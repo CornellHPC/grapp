@@ -80,7 +80,7 @@ def eigs(
     return eigen_values, eigen_vectors
 
 
-def get_eig_pcs(grg: pygrgl.GRG, first_k: int) -> Tuple[NDArray, NDArray, NDArray]:
+def get_eig_pcs(grg, first_k: int) -> Tuple[NDArray, NDArray, NDArray]:
     """
     Get the principle components for each sample corresponding to the first :math:`k` eigenvectors from a GRG,
     using an iterative eigenvector decomposition method.

@@ -4,6 +4,8 @@ from grapp.linalg import (
 import argparse
 import os
 import pygrgl
+import time
+from grapp.manager import set_backend
 
 
 def add_options(subparser):
@@ -35,12 +37,18 @@ def add_options(subparser):
 
 def run(args):
     grg = pygrgl.load_immutable_grg(args.grg_input, load_up_edges=False)
+    #grg = pygrgl.grg_to_gpu(grg)  # Move to GPU for faster PCA if available
+    #set_backend("gpu")
+    time_st = time.time()
     scores = PCs(grg, args.dimensions, args.normalize, use_pro_pca=args.pro_pca)
 
     if args.pcs_out is None:
         args.pcs_out = f"{os.path.basename(args.grg_input)}.pcs.tsv"
 
-    scores.to_csv(args.pcs_out)
+    time_end = time.time()
+    print(f"Computed {args.dimensions} PCs in {time_end - time_st:.2f} seconds")
+
+    scores.to_csv(args.pcs_out, float_format='%.3f')
 
 
 if __name__ == "__main__":

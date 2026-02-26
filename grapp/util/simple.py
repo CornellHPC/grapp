@@ -3,6 +3,7 @@ Simple utility functions.
 """
 
 from typing import Union, Optional
+from grapp.manager import get_backend_manager, set_backend
 import pygrgl
 import numpy
 
@@ -31,7 +32,7 @@ def allele_counts(
 
 
 def allele_frequencies(
-    grg: pygrgl.GRG, adjust_missing: bool = False
+    grg, adjust_missing: bool = False
 ) -> numpy.typing.NDArray:
     """
     Get the allele frequencies for the mutations in the given GRG.
@@ -46,6 +47,7 @@ def allele_frequencies(
     :rtype: numpy.ndarray
     """
     with numpy.errstate(divide="raise"):
+        manager = get_backend_manager()
         kwargs = {}
         miss: Optional[Union[numpy.typing.NDArray, int]] = 0
         if adjust_missing:
@@ -53,7 +55,7 @@ def allele_frequencies(
             kwargs["miss"] = miss
         else:
             miss = None
-        counts = pygrgl.matmul(
+        counts = manager.matmul(
             grg,
             numpy.ones((1, grg.num_samples), dtype=numpy.int32),
             pygrgl.TraversalDirection.UP,

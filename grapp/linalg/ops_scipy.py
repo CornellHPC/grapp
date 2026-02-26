@@ -5,6 +5,7 @@ Linear operators that are compatible with scipy.
 from scipy.sparse.linalg import LinearOperator
 from pygrgl import TraversalDirection
 from typing import Tuple, Union, List, Optional
+from grapp.manager import get_backend_manager
 import concurrent.futures
 import numpy
 import pygrgl
@@ -85,7 +86,8 @@ class SciPyXOperator(LinearOperator):
             A[:, self.mutation_filter] = other_matrix.T  # type: ignore
         else:
             A = other_matrix.T
-        result = pygrgl.matmul(
+        manager = get_backend_manager()
+        result = manager.matmul(
             self.grg,
             A,
             mult_dir,
@@ -179,7 +181,7 @@ class SciPyXTXOperator(LinearOperator):
 class _SciPyStandardizedOperator(LinearOperator):
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg,
         freqs: numpy.typing.NDArray,
         shape: Tuple[int, int],
         dtype: TypeAlias = numpy.float64,
@@ -236,7 +238,7 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg,
         direction: pygrgl.TraversalDirection,
         freqs: numpy.typing.NDArray,
         dtype: TypeAlias = numpy.float64,
@@ -276,9 +278,10 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
             return matrix
 
         with numpy.errstate(divide="raise"):
+            manager = get_backend_manager()
             if direction == _UP:
                 vS = expandm(other_matrix.T) / self.sigma_corrected
-                XvS = pygrgl.matmul(
+                XvS = manager.matmul(
                     self.grg,
                     vS,
                     mult_dir,
@@ -291,7 +294,7 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
             else:
                 assert direction == _DOWN
                 SXv = (
-                    pygrgl.matmul(
+                    manager.matmul(
                         self.grg,
                         expandm(other_matrix.T),
                         mult_dir,
@@ -353,7 +356,7 @@ class SciPyStdXTXOperator(LinearOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg,
         freqs: numpy.typing.NDArray,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,

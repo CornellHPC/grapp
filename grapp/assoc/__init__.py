@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 import pygrgl
 import re
+import time
+from ..manager import get_backend_manager
+
 
 
 def read_covariates_matrix(
@@ -78,7 +81,7 @@ def read_pheno(filename: str):
 
 
 def linear_assoc_no_covar(
-    grg: pygrgl.GRG, Y: np.typing.NDArray, only_beta: bool = False
+    grg, Y: np.typing.NDArray, only_beta: bool = False
 ) -> pd.DataFrame:
     """
     Performs regression for each mutation without adjusting for covariates.
@@ -91,15 +94,18 @@ def linear_assoc_no_covar(
         - POS, FREQ, BETA, B0, SE, R2, T, and P.
     :rtype: pandas.DataFrame
     """
+    backend_manager = get_backend_manager()
+
+    st = time.time()
     assert grg.ploidy == 2, "GWAS is only supported on diploid individuals"
 
     with np.errstate(divide="ignore"):
-        freq_count = pygrgl.matmul(
+        freq_count = backend_manager.matmul(
             grg,
             np.ones((1, grg.num_samples), dtype=np.int32),
             pygrgl.TraversalDirection.UP,
         ).squeeze()
-        XX = pygrgl.matmul(
+        XX = backend_manager.matmul(
             grg,
             np.ones((1, grg.num_samples), dtype=np.int32),
             pygrgl.TraversalDirection.UP,
@@ -112,7 +118,7 @@ def linear_assoc_no_covar(
         yy = np.dot(Y, Y)
 
         freq_count_norm = freq_count / n
-        mut_XY_count = pygrgl.dot_product(grg, y, pygrgl.TraversalDirection.UP)
+        mut_XY_count = backend_manager.dot_product(grg, y, pygrgl.TraversalDirection.UP)
 
         # Vectorized regression components
         nodeXY = mut_XY_count - freq_count_norm * total_pheno
@@ -141,14 +147,13 @@ def linear_assoc_no_covar(
         cdf_vals = t_distribution.cdf(t_stat, df=n - 2)
         p_val = 2 * np.where(t_stat > 0, 1 - cdf_vals, cdf_vals)
 
-        positions = list(
-            map(lambda i: grg.get_mutation_by_id(i).position, range(grg.num_mutations))
-        )
+        #positions = list(
+        #    map(lambda i: grg.get_mutation_by_id(i).position, range(grg.num_mutations))
+        #)
 
         # Build DataFrame
         df = pd.DataFrame(
             {
-                "POS": positions,
                 "FREQ": freq_count,
                 "BETA": beta,
                 "B0": b0,
@@ -158,6 +163,9 @@ def linear_assoc_no_covar(
                 "P": p_val,
             }
         )
+
+        ed = time.time()
+        print(f"linear_assoc_no_covar completed in {ed - st:.2f} seconds")
 
         return df
 

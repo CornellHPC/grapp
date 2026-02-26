@@ -4,6 +4,7 @@ from grapp.assoc import (
     linear_assoc_covar,
     linear_assoc_no_covar,
 )
+from grapp.manager import get_backend_manager, set_backend
 import argparse
 import numpy
 import os
@@ -28,6 +29,8 @@ def add_options(subparser):
 
 def run(args):
     g = pygrgl.load_immutable_grg(args.grg_input, load_up_edges=False)
+    #g = pygrgl.grg_to_gpu(g)  # Move to GPU for faster association testing if available
+    #set_backend("gpu")
     if args.phenotypes is None:
         y = numpy.random.standard_normal(g.num_individuals)
     else:
