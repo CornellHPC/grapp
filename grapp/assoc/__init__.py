@@ -96,7 +96,6 @@ def linear_assoc_no_covar(
     """
     backend_manager = get_backend_manager()
 
-    st = time.time()
     assert grg.ploidy == 2, "GWAS is only supported on diploid individuals"
 
     with np.errstate(divide="ignore"):
@@ -164,9 +163,6 @@ def linear_assoc_no_covar(
             }
         )
 
-        ed = time.time()
-        print(f"linear_assoc_no_covar completed in {ed - st:.2f} seconds")
-
         return df
 
 
@@ -197,6 +193,7 @@ def linear_assoc_covar(
     assert grg.ploidy == 2, "GWAS is only supported on diploid individuals"
 
     with np.errstate(divide="ignore"):
+        backend = get_backend_manager()
         Q, R = np.linalg.qr(C)
 
         # Compute Y adj
@@ -205,7 +202,7 @@ def linear_assoc_covar(
         Yadj2 = np.repeat(Yadj, grg.ploidy)
 
         # X^TX
-        XX = pygrgl.matmul(
+        XX = backend.matmul(
             grg,
             np.ones((1, grg.num_samples), dtype=np.int32),
             pygrgl.TraversalDirection.UP,
@@ -217,7 +214,7 @@ def linear_assoc_covar(
         # G^TQ
         Q_hap = np.repeat(Q, grg.ploidy, axis=0)
         ###Computes G^TQ where Q's rows are duplicated so we can get X^TQ
-        XtQ = pygrgl.matmul(grg, Q_hap.T, pygrgl.TraversalDirection.UP).T
+        XtQ = backend.matmul(grg, Q_hap.T, pygrgl.TraversalDirection.UP).T
 
         # Diagonal of (X^TQ)(X^TQ)^T
         diagonal = (XtQ * XtQ).sum(axis=1)
@@ -226,7 +223,7 @@ def linear_assoc_covar(
         xadjTxadj = XX - diagonal
 
         # Compute (Xadj^TYadj)
-        xadjTyadj = pygrgl.dot_product(grg, Yadj2, pygrgl.TraversalDirection.UP)
+        xadjTyadj = backend.dot_product(grg, Yadj2, pygrgl.TraversalDirection.UP)
 
         if only_beta:
             beta = xadjTyadj / xadjTxadj

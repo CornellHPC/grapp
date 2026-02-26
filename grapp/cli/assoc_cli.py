@@ -9,7 +9,7 @@ import argparse
 import numpy
 import os
 import pygrgl
-
+import time
 
 def add_options(subparser):
     subparser.add_argument("grg_input", help="The input GRG file")
@@ -26,11 +26,13 @@ def add_options(subparser):
         help="Tab-separated output file (with header); exported Pandas DataFrame. Default: <grg_input>.assoc.tsv",
     )
 
-
 def run(args):
     g = pygrgl.load_immutable_grg(args.grg_input, load_up_edges=False)
-    #g = pygrgl.grg_to_gpu(g)  # Move to GPU for faster association testing if available
-    #set_backend("gpu")
+    if args.gpu:
+        g = pygrgl.grg_to_gpu(g)  # Move to GPU for faster association testing if available
+        set_backend("gpu")
+        print("GPU enabled")
+
     if args.phenotypes is None:
         y = numpy.random.standard_normal(g.num_individuals)
     else:
@@ -39,11 +41,16 @@ def run(args):
             len(y) == g.num_individuals
         ), f"Phenotype file had {len(y)} rows, expected {g.num_individuals}"
 
+    time_st = time.time()
+
     if args.covariates is not None:
         C = read_covariates_matrix(args.covariates, True)
         df = linear_assoc_covar(g, y, C)
     else:
         df = linear_assoc_no_covar(g, y)
+
+    time_ed = time.time()
+    print(f"Association testing completed in {time_ed - time_st:.2f} seconds. GPU: {args.gpu}")
 
     if args.out_file is None:
         args.out_file = f"{os.path.basename(args.grg_input)}.assoc.tsv"

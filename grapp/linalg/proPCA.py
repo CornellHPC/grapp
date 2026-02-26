@@ -32,7 +32,7 @@ def _compute_pcs_from_C(
     Q, R = np.linalg.qr(C, mode="reduced")
 
     # 2 Project into that basis
-    B = _SciPyStdXOperator(grg, pygrgl.TraversalDirection.UP, freqs, False)._matmat(Q).T
+    B = _SciPyStdXOperator(grg, pygrgl.TraversalDirection.UP, freqs, C.dtype, False)._matmat(Q).T
 
     # 3 SVD of matrix B
     U, S, Vt = np.linalg.svd(B, full_matrices=False)

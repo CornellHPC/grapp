@@ -37,8 +37,12 @@ def add_options(subparser):
 
 def run(args):
     grg = pygrgl.load_immutable_grg(args.grg_input, load_up_edges=False)
-    #grg = pygrgl.grg_to_gpu(grg)  # Move to GPU for faster PCA if available
-    #set_backend("gpu")
+
+    if args.gpu:
+        grg = pygrgl.grg_to_gpu(grg)  # Move to GPU for faster PCA if available
+        set_backend("gpu")
+        print("GPU enabled")
+
     time_st = time.time()
     scores = PCs(grg, args.dimensions, args.normalize, use_pro_pca=args.pro_pca)
 
@@ -46,7 +50,7 @@ def run(args):
         args.pcs_out = f"{os.path.basename(args.grg_input)}.pcs.tsv"
 
     time_end = time.time()
-    print(f"Computed {args.dimensions} PCs in {time_end - time_st:.2f} seconds")
+    print(f"Computed {args.dimensions} PCs in {time_end - time_st:.2f} seconds. GPU: {args.gpu}")
 
     scores.to_csv(args.pcs_out, float_format='%.3f')
 

@@ -17,6 +17,14 @@ CMD_SHOW = "show"
 
 def main():
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "-g", 
+        "--gpu", 
+        action="store_true", 
+        help="Use GPU for computation"
+    )
+    
     subparsers = parser.add_subparsers(dest="command")
     assoc_parser = subparsers.add_parser(
         CMD_ASSOC,
