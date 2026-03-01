@@ -2,11 +2,12 @@ import math
 import numpy
 import os
 import pandas as pd
-import pygrgl
 import sys
 import tempfile
 import unittest
 from collections import defaultdict
+
+from grapp.backends import IMMUTABLE_GRG
 from grapp.assoc import linear_assoc_no_covar, linear_assoc_covar, read_pheno
 from grapp.linalg import PCs
 from grapp.util.filter import grg_save_samples
@@ -23,7 +24,7 @@ class TestGWAS(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.gwas.grg")
-        cls.grg = pygrgl.load_immutable_grg(cls.grg_filename, load_up_edges=True)
+        cls.grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=True)
         cls.pheno_path = os.path.join(INPUT_DIR, "phenotypes.txt")
         assert os.path.isfile(cls.pheno_path)
 
@@ -141,7 +142,7 @@ class TestGWAS(unittest.TestCase):
         # Create the filtered GRG by just removing the individuals with missing Y
         filt_name = "test.gwas.missingY.grg"
         grg_save_samples(self.grg, filt_name, keep_samples)
-        filt_grg = pygrgl.load_immutable_grg(filt_name, load_up_edges=False)
+        filt_grg = IMMUTABLE_GRG(filt_name, load_up_edges=False)
         self.assertEqual(filt_grg.num_individuals, Y_kept.shape[0])
 
         # Use binomial estimates

@@ -1,7 +1,7 @@
 from grg_pheno_sim.phenotype import sim_phenotypes, convert_to_phen
 import argparse
 import os
-import pygrgl
+from grapp.backends import IMMUTABLE_GRG
 
 
 def add_options(subparser):
@@ -47,7 +47,7 @@ def run(args):
     base = os.path.basename(args.grg_input)
     effect_path = f"{base}.effects.par"
     output_path = f"{base}.phen"
-    grg = pygrgl.load_immutable_grg(args.grg_input, load_up_edges=False)
+    grg = IMMUTABLE_GRG(args.grg_input, load_up_edges=False)
     phenotypes = sim_phenotypes(
         grg,
         num_causal=args.num_causal,

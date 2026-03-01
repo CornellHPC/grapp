@@ -11,7 +11,8 @@ import concurrent.futures
 import numpy
 import os
 import pandas
-import pygrgl
+from grapp import GRGBase
+from grapp.backends import IMMUTABLE_GRG
 
 
 def add_options(subparser):
@@ -63,7 +64,7 @@ def add_options(subparser):
 
 
 def do_single_gwas(
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     y: numpy.typing.NDArray,
     C: Optional[numpy.typing.NDArray],
     method: Optional[str],
@@ -82,7 +83,7 @@ def do_single_gwas(
 
 
 def run(args):
-    grgs = [pygrgl.load_immutable_grg(g, load_up_edges=False) for g in args.grg_input]
+    grgs = [IMMUTABLE_GRG(g, load_up_edges=False) for g in args.grg_input]
     if args.phenotypes is None:
         print("No phenotype provided; randomly generating phenotype values")
         y = numpy.random.standard_normal(grgs[0].num_individuals)

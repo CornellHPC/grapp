@@ -5,6 +5,8 @@ import itertools
 import numpy
 import os
 import pygrgl
+from grapp import GRGBase
+from grapp.backends import IMMUTABLE_GRG
 import shutil
 import subprocess
 
@@ -38,7 +40,7 @@ def construct_grg(
 
 # It is important that this only uses down edges, so that we can test against
 # matmul methods which (should) only require down edges.
-def grg2X(grg: pygrgl.GRG, diploid: bool = False):
+def grg2X(grg: GRGBase, diploid: bool = False):
     samples = grg.num_individuals if diploid else grg.num_samples
     result = numpy.zeros((samples, grg.num_mutations))
     samps_below = [list() for _ in range(grg.num_nodes)]
@@ -132,7 +134,7 @@ def split_and_load(
     )
     grgs = []
     for fn in glob.glob(os.path.join(out_dir, "*.grg")):
-        grgs.append(pygrgl.load_immutable_grg(fn))
+        grgs.append(IMMUTABLE_GRG(fn))
         if filenames is not None:
             filenames.append(fn)
     grgs.sort(key=lambda g: g.bp_range[0])

@@ -9,12 +9,13 @@ from grapp.linalg.ops_scipy import (
     SciPyXOperator,
     SciPyXTXOperator,
 )
+from grapp.backends import IMMUTABLE_GRG
 from grapp.util import allele_frequencies
 from grapp.util.filter import grg_save_samples
 import itertools
 import numpy
 import os
-import pygrgl
+from grapp import Direction
 import sys
 import unittest
 
@@ -39,7 +40,7 @@ class TestLinearOperators(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.linop.grg")
-        cls.grg = pygrgl.load_immutable_grg(cls.grg_filename, load_up_edges=True)
+        cls.grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=True)
 
         numpy.random.seed(42)
 
@@ -62,7 +63,7 @@ class TestLinearOperators(unittest.TestCase):
         self.assertAlmostEqual(numpy.sum(numpy_hap_result), numpy.sum(numpy_dip_result))
 
         grg_hap_op = SciPyXOperator(
-            self.grg, pygrgl.TraversalDirection.UP, haploid=True
+            self.grg, Direction.UP, haploid=True
         )
         grg_hap_result = grg_hap_op._matmat(random_input)
         numpy.testing.assert_allclose(grg_hap_result, numpy_hap_result)
@@ -94,7 +95,7 @@ class TestLinearOperators(unittest.TestCase):
         numpy_result = numpy.matmul(X_stand, random_input)
 
         freqs = allele_frequencies(self.grg)
-        grg_op = SciPyStdXOperator(self.grg, pygrgl.TraversalDirection.UP, freqs)
+        grg_op = SciPyStdXOperator(self.grg, Direction.UP, freqs)
         grg_result = grg_op._matmat(random_input)
 
         self.assertFalse(numpy.any(numpy.isinf(grg_result)))
@@ -112,7 +113,7 @@ class TestLinearOperators(unittest.TestCase):
         numpy_result = numpy.matmul(XT_stand, random_input)
 
         freqs = allele_frequencies(self.grg)
-        grg_op = SciPyStdXOperator(self.grg, pygrgl.TraversalDirection.DOWN, freqs)
+        grg_op = SciPyStdXOperator(self.grg, Direction.DOWN, freqs)
         grg_result = grg_op._matmat(random_input)
 
         self.assertFalse(numpy.any(numpy.isinf(grg_result)))
@@ -166,11 +167,11 @@ class TestLinearOperators(unittest.TestCase):
         random_input = numpy.random.standard_normal((K, self.grg.num_mutations)).T
 
         # Result on the full graph.
-        grg_op = SciPyXOperator(self.grg, pygrgl.TraversalDirection.UP, haploid=False)
+        grg_op = SciPyXOperator(self.grg, Direction.UP, haploid=False)
         full_dip_result = grg_op._matmat(random_input)
         # Result on the split graph
         multi_op = MultiSciPyXOperator(
-            grgs, pygrgl.TraversalDirection.UP, haploid=False, threads=JOBS
+            grgs, Direction.UP, haploid=False, threads=JOBS
         )
         self.assertEqual(multi_op.shape, grg_op.shape)
         split_dip_result = multi_op._matmat(random_input)
@@ -185,11 +186,11 @@ class TestLinearOperators(unittest.TestCase):
         numpy.testing.assert_allclose(full_dip_result, split_dip_result)
 
         # Result on the full graph.
-        grg_op = SciPyXOperator(self.grg, pygrgl.TraversalDirection.DOWN, haploid=False)
+        grg_op = SciPyXOperator(self.grg, Direction.DOWN, haploid=False)
         full_dip_result = grg_op._matmat(random_input)
         # Result on the split graph
         multi_op = MultiSciPyXOperator(
-            grgs, pygrgl.TraversalDirection.DOWN, haploid=False, threads=JOBS
+            grgs, Direction.DOWN, haploid=False, threads=JOBS
         )
         self.assertEqual(multi_op.shape, grg_op.shape)
         split_dip_result = multi_op._matmat(random_input)
@@ -227,13 +228,13 @@ class TestLinearOperators(unittest.TestCase):
         # Result on the full graph.
         freqs = allele_frequencies(self.grg)
         grg_op = SciPyStdXOperator(
-            self.grg, pygrgl.TraversalDirection.UP, freqs, haploid=False
+            self.grg, Direction.UP, freqs, haploid=False
         )
         full_dip_result = grg_op._matmat(random_input)
         # Result on the split graph
         freq_list = list(map(allele_frequencies, grgs))
         multi_op = MultiSciPyStdXOperator(
-            grgs, pygrgl.TraversalDirection.UP, freq_list, haploid=False, threads=JOBS
+            grgs, Direction.UP, freq_list, haploid=False, threads=JOBS
         )
         self.assertEqual(multi_op.shape, grg_op.shape)
         split_dip_result = multi_op._matmat(random_input)
@@ -276,14 +277,14 @@ class TestLinearOperators(unittest.TestCase):
         random_input = numpy.random.standard_normal((K, len(keep_mutations))).T
         grg_op = SciPyXOperator(
             self.grg,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             haploid=False,
             mutation_filter=keep_mutations,
         )
         full_dip_result = grg_op._matmat(random_input)
         multi_op = MultiSciPyXOperator(
             grgs,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             haploid=False,
             mutation_filter=keep_mutations,
             threads=JOBS,
@@ -360,7 +361,7 @@ class TestLinearOperators(unittest.TestCase):
         ### Non-standardized X operator
         # UP
         grg_dip_op = SciPyXOperator(
-            self.grg, pygrgl.TraversalDirection.UP, mutation_filter=keep_mutations
+            self.grg, Direction.UP, mutation_filter=keep_mutations
         )
         numpy_dip_result = numpy.matmul(X_dip, random_mutvec)
         grg_dip_result = grg_dip_op._matvec(random_mutvec).squeeze()
@@ -369,14 +370,14 @@ class TestLinearOperators(unittest.TestCase):
         grg_dip_result = grg_dip_op._matmat(random_mutvals)
         numpy.testing.assert_allclose(grg_dip_result, numpy_dip_result)
         grg_dip_multi_op = MultiSciPyXOperator(
-            [self.grg], pygrgl.TraversalDirection.UP, mutation_filter=keep_mutations
+            [self.grg], Direction.UP, mutation_filter=keep_mutations
         )
         grg_dip_multi_result = grg_dip_multi_op._matmat(random_mutvals)
         numpy.testing.assert_allclose(grg_dip_multi_result, numpy_dip_result)
 
         # DOWN
         grg_dip_op = SciPyXOperator(
-            self.grg, pygrgl.TraversalDirection.DOWN, mutation_filter=keep_mutations
+            self.grg, Direction.DOWN, mutation_filter=keep_mutations
         )
         numpy_dip_result = numpy.matmul(X_dip.T, random_sampvals)
         grg_dip_result = grg_dip_op._matmat(random_sampvals)
@@ -395,7 +396,7 @@ class TestLinearOperators(unittest.TestCase):
         # UP
         grg_op = SciPyStdXOperator(
             self.grg,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             freqs,
             mutation_filter=keep_mutations,
         )
@@ -409,7 +410,7 @@ class TestLinearOperators(unittest.TestCase):
         numpy_dip_result = numpy.matmul(X_dip_std.T, random_sampvals)
         grg_op = SciPyStdXOperator(
             self.grg,
-            pygrgl.TraversalDirection.DOWN,
+            Direction.DOWN,
             freqs,
             mutation_filter=keep_mutations,
         )
@@ -421,7 +422,7 @@ class TestLinearOperators(unittest.TestCase):
         MISSING_INDIVS = 21
         MISSING_SAMPLES = 25
         grg_filename = construct_grg("test-200-samples.miss.igd", "test.linop.miss.grg")
-        grg = pygrgl.load_immutable_grg(grg_filename, load_up_edges=False)
+        grg = IMMUTABLE_GRG(grg_filename, load_up_edges=False)
 
         # X is the explicit genotype matrix, with allele frequency used for missing items. So the
         # only non-0,1,2 values should be missing items.
@@ -432,7 +433,7 @@ class TestLinearOperators(unittest.TestCase):
 
         # Create the operator, using the allele frequencies as the mean value for each Mutation
         freqs = allele_frequencies(grg, adjust_missing=True)
-        X_op = SciPyXOperator(grg, pygrgl.TraversalDirection.UP, miss_values=freqs)
+        X_op = SciPyXOperator(grg, Direction.UP, miss_values=freqs)
 
         #### UP direction (AX) ####
         K = 7
@@ -450,7 +451,7 @@ class TestLinearOperators(unittest.TestCase):
         numpy.testing.assert_allclose(numpy_result, grg_result)
 
         # Just a sanity check: using the non-missingness-adjusted operator should cause failure.
-        X_nomiss_op = SciPyXOperator(grg, pygrgl.TraversalDirection.UP)
+        X_nomiss_op = SciPyXOperator(grg, Direction.UP)
         grg_result = rv @ X_nomiss_op.T
         self.assertFalse(numpy.allclose(numpy_result, grg_result))
 
@@ -465,17 +466,17 @@ class TestLinearOperators(unittest.TestCase):
 
         filt_name = "test.ignore_samples.grg"
         grg_save_samples(self.grg, filt_name, keep_samples)
-        filt_grg = pygrgl.load_immutable_grg(filt_name, load_up_edges=False)
+        filt_grg = IMMUTABLE_GRG(filt_name, load_up_edges=False)
 
         K = 17
         Y = numpy.random.standard_normal((K, self.grg.num_individuals))
         sub_Y = Y[:, keep_indivs]
 
         # Non-standardized operator
-        truth_op = SciPyXOperator(filt_grg, pygrgl.TraversalDirection.UP)
+        truth_op = SciPyXOperator(filt_grg, Direction.UP)
         truth_matrix = sub_Y @ truth_op
         mask_op = SciPyXOperator(
-            self.grg, pygrgl.TraversalDirection.UP, mask_samples=ignore_indivs
+            self.grg, Direction.UP, mask_samples=ignore_indivs
         )
         mask_matrix = Y @ mask_op
         numpy.testing.assert_allclose(truth_matrix, mask_matrix)
@@ -486,12 +487,12 @@ class TestLinearOperators(unittest.TestCase):
         numpy.testing.assert_allclose(truth_freqs, mask_freqs, atol=ABSOLUTE_TOLERANCE)
 
         truth_op = SciPyStdXOperator(
-            filt_grg, pygrgl.TraversalDirection.UP, truth_freqs
+            filt_grg, Direction.UP, truth_freqs
         )
         truth_matrix = sub_Y @ truth_op
         mask_op = SciPyStdXOperator(
             self.grg,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             mask_freqs,
             mask_samples=ignore_indivs,
         )

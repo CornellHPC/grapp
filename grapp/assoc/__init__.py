@@ -1,12 +1,13 @@
 from grapp.linalg.ops_scipy import SciPyStdXOperator, SciPyXOperator
 from grapp.util.simple import allele_counts, _GenotypeDist
+from grapp import GRGBase, Direction
 from scipy.stats import t as t_distribution
 from typing import List
 import itertools
 import math
 import numpy
 import pandas
-import pygrgl
+from grapp import GRGBase, Direction
 import re
 import sklearn.linear_model
 import sys
@@ -103,7 +104,7 @@ def read_pheno(filename: str, verbose: bool = True) -> numpy.typing.NDArray:
 
 
 def _computeDiagXTX(
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     dist: str,
     acount: numpy.typing.NDArray,
     n_j: numpy.typing.NDArray,
@@ -118,10 +119,9 @@ def _computeDiagXTX(
         # diag(X^T @ X): for the non-standardized genotype matrix, GRG has a special initialization
         # method "xtx" which uses coalescence information to compute the diagonal in a single pass
         if dist == _GenotypeDist.SAMPLE.value:
-            XX = pygrgl.matmul(
-                grg,
+            XX = grg.matmul(
                 numpy.ones((1, grg.num_samples), dtype=numpy.int32),
-                pygrgl.TraversalDirection.UP,
+                Direction.UP,
                 init="xtx",
             ).squeeze()
             # The xtx calculation above does not know about our missing phenotypes, so we need
@@ -139,7 +139,7 @@ def _computeDiagXTX(
 
 
 def linear_assoc_no_covar(
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     Y: numpy.typing.NDArray,
     only_beta: bool = False,
     standardize: bool = False,
@@ -188,7 +188,7 @@ def linear_assoc_no_covar(
     if standardize:
         X_op = SciPyStdXOperator(
             grg,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             afreq_haploid,
             haploid=False,
             mask_samples=missing_indivs,
@@ -198,7 +198,7 @@ def linear_assoc_no_covar(
     else:
         X_op = SciPyXOperator(
             grg,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             haploid=False,
             miss_values=afreq_haploid,
             mask_samples=missing_indivs,
@@ -265,7 +265,7 @@ def linear_assoc_no_covar(
 
 
 def linear_assoc_covar(
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     Y: numpy.typing.NDArray,
     C: numpy.typing.NDArray,
     only_beta: bool = False,
@@ -355,7 +355,7 @@ def linear_assoc_covar(
     if standardize:
         X_op = SciPyStdXOperator(
             grg,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             afreq_haploid,
             haploid=False,
             mask_samples=missing_indivs,
@@ -365,7 +365,7 @@ def linear_assoc_covar(
     else:
         X_op = SciPyXOperator(
             grg,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             haploid=False,
             miss_values=afreq_haploid,
             mask_samples=missing_indivs,

@@ -5,7 +5,8 @@ from grapp.linalg import (
     get_pcs_propca,
     sort_by_eigvalues,
 )
-import pygrgl
+from grapp.backends import IMMUTABLE_GRG
+
 import numpy
 import os
 import unittest
@@ -28,7 +29,7 @@ class TestPCA(unittest.TestCase):
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.pca.grg")
         # Up edges needed for grg2X
-        cls.grg = pygrgl.load_immutable_grg(cls.grg_filename, load_up_edges=False)
+        cls.grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=False)
 
     def test_eigvals(self):
         X_stand = standardize_X(grg2X(self.grg, diploid=True))

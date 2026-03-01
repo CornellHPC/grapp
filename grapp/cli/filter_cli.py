@@ -13,7 +13,8 @@ from grapp.util.simple import (
 from typing import Set
 import argparse
 import os
-import pygrgl
+from grapp import GRGBase
+from grapp.backends import IMMUTABLE_GRG
 
 
 class VariantType(Enum):
@@ -193,7 +194,7 @@ def run(args):
             brange = (0, 0)
         else:
             brange = args.range
-        grg = pygrgl.load_immutable_grg(args.grg_input, load_up_edges=False)
+        grg = IMMUTABLE_GRG(args.grg_input, load_up_edges=False)
         counts = None
         freqs = None
         if args.min_ac is not None or args.max_ac is not None:
@@ -201,7 +202,7 @@ def run(args):
         if args.min_af is not None or args.max_af is not None:
             freqs = allele_frequencies(grg)
 
-        def filter_method(grg: pygrgl.GRG, mut_id: int):
+        def filter_method(grg: GRGBase, mut_id: int):
             mut = grg.get_mutation_by_id(mut_id)
             if args.range is not None and not (
                 mut.position >= brange[0] and mut.position < brange[1]

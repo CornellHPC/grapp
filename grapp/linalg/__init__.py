@@ -5,7 +5,7 @@ could apply to many different types of analyses.
 
 import numpy
 import pandas as pd
-import pygrgl
+from grapp import GRGBase, Direction
 import random
 import sys
 import concurrent.futures
@@ -32,7 +32,7 @@ class MatrixSelection(Enum):
     XTX = 3  # The MxM covariance or correlation matrix
 
 
-def _random_window_filter(grg: pygrgl.GRG, sample_window: int):
+def _random_window_filter(grg: GRGBase, sample_window: int):
     # Create a mask for random mutation subset based on input argument.
     mutation_filter = []
     if sample_window > 1:
@@ -75,7 +75,7 @@ def sort_by_eigvalues(
 
 def eigs(
     matrix: MatrixSelection,
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     k: int,
     standardized: bool = True,
     haploid: bool = False,
@@ -88,7 +88,7 @@ def eigs(
         the transposed genotype matrix (MatrixSelection.XT), or the covariance/correlation matrix (MatrixSelection.XTX).
     :type matrix: MatrixSelection
     :param grg: The GRG to operate on.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param k: The number of (largest) eigen values/vectors to retrieve.
     :type k: int
     :param standardized: Set to False to use the non-standardized matrix. Default: True.
@@ -104,7 +104,7 @@ def eigs(
         if standardized:
             operator = _SciPyStdXOperator(
                 grg,
-                pygrgl.TraversalDirection.UP,
+                Direction.UP,
                 freqs,
                 haploid=haploid,
                 **op_kwargs,
@@ -112,7 +112,7 @@ def eigs(
         else:
             operator = _SciPyXOperator(
                 grg,
-                pygrgl.TraversalDirection.UP,
+                Direction.UP,
                 freqs,
                 haploid=haploid,
                 **op_kwargs,
@@ -121,7 +121,7 @@ def eigs(
         if standardized:
             operator = _SciPyStdXOperator(
                 grg,
-                pygrgl.TraversalDirection.DOWN,
+                Direction.DOWN,
                 freqs,
                 haploid=haploid,
                 **op_kwargs,
@@ -129,7 +129,7 @@ def eigs(
         else:
             operator = _SciPyXOperator(
                 grg,
-                pygrgl.TraversalDirection.DOWN,
+                Direction.DOWN,
                 freqs,
                 haploid=haploid,
                 **op_kwargs,
@@ -145,7 +145,7 @@ def eigs(
 
 
 def get_eig_pcs(
-    grgs: Union[pygrgl.GRG, List[pygrgl.GRG]],
+    grgs: Union[GRGBase, List[GRGBase]],
     k: int,
     op_kwargs: Dict[str, Any] = {},
     threads: int = 1,
@@ -156,7 +156,7 @@ def get_eig_pcs(
     using an iterative eigenvector decomposition method.
 
     :param grgs: The GRG or list of GRGs to perform PCA on.
-    :type grgs: Union[pygrgl.GRG, List[pygrgl.GRG]]
+    :type grgs: Union[GRGBase, List[GRGBase]]
     :param k: The number of eigenvectors/values to use. These correspond to the `k` largest
         eigenvalues.
     :type k: int
@@ -191,7 +191,7 @@ def get_eig_pcs(
     if isinstance(grgs, list):
         PC_scores = _MultiSciPyStdXOperator(
             grgs,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             freqs,  # type: ignore
             haploid=False,
             threads=threads,
@@ -200,7 +200,7 @@ def get_eig_pcs(
     else:
         PC_scores = _SciPyStdXOperator(
             grgs,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             freqs,  # type: ignore
             haploid=False,
             **op_kwargs,
@@ -209,7 +209,7 @@ def get_eig_pcs(
 
 
 def PCs(
-    grgs: Union[pygrgl.GRG, List[pygrgl.GRG]],
+    grgs: Union[GRGBase, List[GRGBase]],
     k: int,
     unitvar: bool = True,
     include_eig: bool = False,
@@ -221,7 +221,7 @@ def PCs(
     Get the principle components for each sample corresponding to the first :math:`k` eigenvectors from a GRG.
 
     :param grgs: The GRG or list of GRGs to perform PCA on.
-    :type grgs: Union[pygrgl.GRG, List[pygrgl.GRG]]
+    :type grgs: Union[GRGBase, List[GRGBase]]
     :param k: The number of eigenvectors/values to use. These correspond to the `k` largest
         eigenvalues.
     :type k: int

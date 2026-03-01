@@ -4,7 +4,7 @@ from grapp.linalg import (
 from grapp.cli.util import pandas_to_tsv
 import argparse
 import os
-import pygrgl
+from grapp.backends import IMMUTABLE_GRG
 
 
 def add_options(subparser):
@@ -50,7 +50,7 @@ def add_options(subparser):
 
 def run(args):
     grg_list = [
-        pygrgl.load_immutable_grg(gf, load_up_edges=False) for gf in args.grg_input
+        IMMUTABLE_GRG(gf, load_up_edges=False) for gf in args.grg_input
     ]
     scores = PCs(
         grg_list,

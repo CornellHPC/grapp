@@ -3,7 +3,8 @@ import numpy
 import numpy.typing
 import os
 import pyigd
-import pygrgl
+from grapp import Direction
+from grapp.backends import IMMUTABLE_GRG
 import subprocess
 import unittest
 from typing import Optional
@@ -61,7 +62,7 @@ class TestExactDistance(unittest.TestCase):
         igd_from_matrix(matrix, igd_filename)
         grg_file = construct_grg(igd_filename)
 
-        grg = pygrgl.load_immutable_grg(grg_file, load_up_edges=False)
+        grg = IMMUTABLE_GRG(grg_file, load_up_edges=False)
         self.assertEqual(grg.num_samples, 5)
         self.assertEqual(grg.num_mutations, 12)
 
@@ -93,7 +94,7 @@ class TestExactDistance(unittest.TestCase):
         igd_from_matrix(matrix, igd_filename)
         grg_file = construct_grg(igd_filename)
 
-        grg = pygrgl.load_immutable_grg(grg_file, load_up_edges=False)
+        grg = IMMUTABLE_GRG(grg_file, load_up_edges=False)
         self.assertEqual(grg.num_samples, 9)
         self.assertEqual(grg.num_mutations, 11)
 
@@ -117,7 +118,7 @@ class TestExactDistance(unittest.TestCase):
         igd_from_matrix(matrix, igd_filename)
         grg_file = construct_grg(igd_filename)
 
-        grg = pygrgl.load_immutable_grg(grg_file, load_up_edges=True)
+        grg = IMMUTABLE_GRG(grg_file, load_up_edges=True)
         self.assertEqual(grg.num_samples, 5)
         self.assertEqual(grg.num_mutations, 12)
 
@@ -140,7 +141,7 @@ class TestExactDistance(unittest.TestCase):
         for i in range(grg.num_samples):
             for j in range(i + 1, grg.num_samples):
                 self.assertEqual(
-                    nn.fast_pairwise_hamming(i, j, pygrgl.TraversalDirection.UP),
+                    nn.fast_pairwise_hamming(i, j, Direction.UP),
                     expected[i, j],
                 )
 

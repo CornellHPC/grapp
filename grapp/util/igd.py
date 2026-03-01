@@ -9,7 +9,9 @@ from grapp.util.filter import split_by_ranges
 
 import numpy
 import os
-import pygrgl
+from grapp import GRGBase, Direction
+from grapp.backends import IMMUTABLE_GRG
+
 import pyigd
 import shutil
 import sys
@@ -18,10 +20,10 @@ import tempfile
 
 # Helper that converts a single GRG into a single IGD
 def _grg2igd(
-    grg_or_file: Union[str, pygrgl.GRG], igd_prefix: str, batch_size: int
+    grg_or_file: Union[str, GRGBase], igd_prefix: str, batch_size: int
 ) -> str:
     if isinstance(grg_or_file, str):
-        grg = pygrgl.load_immutable_grg(grg_or_file, load_up_edges=False)
+        grg = IMMUTABLE_GRG(grg_or_file, load_up_edges=False)
     else:
         grg = grg_or_file
     if igd_prefix.endswith(".igd"):
@@ -48,10 +50,9 @@ def _grg2igd(
             y = numpy.identity(rows, dtype=DTYPE)
             z = numpy.zeros((rows, grg.num_mutations - end), dtype=DTYPE)
 
-            sample_matrix = pygrgl.matmul(
-                grg,
+            sample_matrix = grg.matmul(
                 numpy.concatenate((x, y, z), axis=1),
-                pygrgl.TraversalDirection.DOWN,
+                Direction.DOWN,
             )
 
             # Each row of the sample_matrix is the dense vector for the IGD variant.
@@ -91,7 +92,7 @@ def _get_temp_dir_context(temp_dir: Optional[str] = None) -> Callable:
 
 
 def export_igd(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_filename: str,
     jobs: int = 1,
     batch_size: Union[str, int] = "auto",
@@ -109,9 +110,9 @@ def export_igd(
     sample list for a variant, you can just read the row from the IGD.
     2. Conversion to other standard formats is very fast, for example .vcf.gz
 
-    :param grg_or_filename: The GRG to convert, either as a pygrgl.GRG or the
+    :param grg_or_filename: The GRG to convert, either as a GRGBase or the
         filename of a GRG.
-    :type grg: Union[pygrgl.GRG, str]
+    :type grg: Union[GRGBase, str]
     :param out_filename: The IGD file to create. The path up to the filename must
         already exist, and the file itself must not exist.
     :type out_filename: str
@@ -149,12 +150,12 @@ def export_igd(
 
     with _get_temp_dir_context(temp_dir)() as tmpdirname:
         if isinstance(grg_or_filename, str):
-            grg = pygrgl.load_immutable_grg(grg_or_filename, load_up_edges=False)
+            grg = IMMUTABLE_GRG(grg_or_filename, load_up_edges=False)
             grg_filename = grg_or_filename
         else:
             grg = grg_or_filename
             grg_filename = os.path.join(tmpdirname, "input.grg")
-            pygrgl.save_grg(grg, grg_filename)
+            grg.save_grg(grg_filename)
 
         split_ranges = []
         for start in range(grg.bp_range[0], grg.bp_range[1], split_threshold):
@@ -324,7 +325,7 @@ def igd_to_vcf(
 
 
 def export_vcf(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_file_obj: TextIO,
     contig: str = "unknown",
     jobs: int = 1,
@@ -339,9 +340,9 @@ def export_vcf(
     Export a GRG to a phased VCF file. Usage should to either use a Gzip file
     object for the output, or stdout and then pipe the results to bgzip.
 
-    :param grg_or_filename: The GRG to convert, either as a pygrgl.GRG or the
+    :param grg_or_filename: The GRG to convert, either as a GRGBase or the
         filename of a GRG.
-    :type grg: Union[pygrgl.GRG, str]
+    :type grg: Union[GRGBase, str]
     :param out_file_obj: The file handle to write VCF data to.
     :type out_filename: TextIO
     :param contig: The contig name to use in the VCF. Default: "unknown".

@@ -6,13 +6,14 @@ from multiprocessing import Pool
 from typing import List, Tuple, Optional, Union, Callable
 from collections import defaultdict
 import os
-import pygrgl
 
+from grapp import GRGBase, Direction
+from grapp.backends import IMMUTABLE_GRG
 from grapp.util.simple import UserInputError, allele_frequencies
 
 
 def grg_save_individuals(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_filename: str,
     individual_ids: List[str],
     allow_extra: bool = False,
@@ -21,8 +22,8 @@ def grg_save_individuals(
     """
     Save a GRG, keeping only the individuals with the IDs given in the list.
 
-    :param grg_or_filename: Either a pygrgl.GRG object, or the filename of a GRG.
-    :type grg_or_filename: Union[pygrgl.GRG, str]
+    :param grg_or_filename: Either a GRGBase object, or the filename of a GRG.
+    :type grg_or_filename: Union[GRGBase, str]
     :param out_filename: The new GRG file to create.
     :type out_filename: str
     :param individual_ids: List of individual identifiers to be kept.
@@ -32,7 +33,7 @@ def grg_save_individuals(
     :type allow_extra: bool
     """
     if isinstance(grg_or_filename, str):
-        grg = pygrgl.load_immutable_grg(grg_or_filename, load_up_edges=True)
+        grg = IMMUTABLE_GRG(grg_or_filename, load_up_edges=True)
     else:
         grg = grg_or_filename
     sample_nodes = []
@@ -49,16 +50,15 @@ def grg_save_individuals(
         )
     if verbose:
         print(f"Keeping {len(sample_nodes)} haplotypes")
-    pygrgl.save_subset(
-        grg,
+    grg.save_subset(
         out_filename,
-        pygrgl.TraversalDirection.UP,
+        Direction.UP,
         sample_nodes,
     )
 
 
 def grg_save_samples(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_filename: str,
     sample_nodes: List[int],
     verbose: bool = False,
@@ -68,8 +68,8 @@ def grg_save_samples(
     (indexes) given. See grg_save_individuals() for a version that uses
     identifiers to more "safely" down sample a GRG dataset.
 
-    :param grg_or_filename: Either a pygrgl.GRG object, or the filename of a GRG.
-    :type grg_or_filename: Union[pygrgl.GRG, str]
+    :param grg_or_filename: Either a GRGBase object, or the filename of a GRG.
+    :type grg_or_filename: Union[GRGBase, str]
     :param out_filename: The new GRG file to create.
     :type out_filename: str
     :param sample_nodes: List of NodeIDs (indexes) for the haploid samples. If a
@@ -78,7 +78,7 @@ def grg_save_samples(
     :type sample_nodes: List[str]
     """
     if isinstance(grg_or_filename, str):
-        grg = pygrgl.load_immutable_grg(grg_or_filename, load_up_edges=True)
+        grg = IMMUTABLE_GRG(grg_or_filename, load_up_edges=True)
     else:
         grg = grg_or_filename
     if not all(map(grg.is_sample, sample_nodes)):
@@ -87,16 +87,15 @@ def grg_save_samples(
         )
     if verbose:
         print(f"Keeping {len(sample_nodes)} haplotypes")
-    pygrgl.save_subset(
-        grg,
+    grg.save_subset(
         out_filename,
-        pygrgl.TraversalDirection.UP,
+        Direction.UP,
         sample_nodes,
     )
 
 
 def grg_save_populations(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_filename: str,
     populations: List[str],
     allow_extra: bool = False,
@@ -105,8 +104,8 @@ def grg_save_populations(
     """
     Save a GRG, keeping only the samples with populations matching the given population list.
 
-    :param grg_or_filename: Either a pygrgl.GRG object, or the filename of a GRG.
-    :type grg_or_filename: Union[pygrgl.GRG, str]
+    :param grg_or_filename: Either a GRGBase object, or the filename of a GRG.
+    :type grg_or_filename: Union[GRGBase, str]
     :param out_filename: The new GRG file to create.
     :type out_filename: str
     :param populations: List of population names to be kept.
@@ -116,7 +115,7 @@ def grg_save_populations(
     :type allow_extra: bool
     """
     if isinstance(grg_or_filename, str):
-        grg = pygrgl.load_immutable_grg(grg_or_filename, load_up_edges=True)
+        grg = IMMUTABLE_GRG(grg_or_filename, load_up_edges=True)
     else:
         grg = grg_or_filename
     grg_pops = grg.get_populations()
@@ -141,7 +140,7 @@ def grg_save_populations(
 
 
 def grg_save_range(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_filename: str,
     bp_range: Tuple[int, int],
 ):
@@ -149,8 +148,8 @@ def grg_save_range(
     Given a GRG filename or object, save a new GRG that contains only the Mutations in
     the given basepair range.
 
-    :param grg_or_filename: Either a pygrgl.GRG object, or the filename of a GRG.
-    :type grg_or_filename: Union[pygrgl.GRG, str]
+    :param grg_or_filename: Either a GRGBase object, or the filename of a GRG.
+    :type grg_or_filename: Union[GRGBase, str]
     :param out_filename: The filename of the to-be-created GRG.
     :type out_filename: str
     :param bp_range: A pair (lower, upper), where both are in units basepair, and the
@@ -159,7 +158,7 @@ def grg_save_range(
     :type bp_range: Tuple[int, int]
     """
 
-    def keep_mut(grg: pygrgl.GRG, mut_id: int):
+    def keep_mut(grg: GRGBase, mut_id: int):
         position = grg.get_mutation_by_id(mut_id).position
         return position >= bp_range[0] and position < bp_range[1]
 
@@ -167,7 +166,7 @@ def grg_save_range(
 
 
 def grg_save_freq(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_filename: str,
     freq_range: Tuple[float, float],
 ):
@@ -175,8 +174,8 @@ def grg_save_freq(
     Given a GRG filename or object, save a new GRG that contains only the Mutations in
     the given frequency range.
 
-    :param grg_or_filename: Either a pygrgl.GRG object, or the filename of a GRG.
-    :type grg_or_filename: Union[pygrgl.GRG, str]
+    :param grg_or_filename: Either a GRGBase object, or the filename of a GRG.
+    :type grg_or_filename: Union[GRGBase, str]
     :param out_filename: The filename of the to-be-created GRG.
     :type out_filename: str
     :param freq_range: A pair (lower, upper), where the Mutations will be kept if
@@ -186,7 +185,7 @@ def grg_save_freq(
 
     freqs = None
 
-    def keep_mut(grg: pygrgl.GRG, mut_id: int):
+    def keep_mut(grg: GRGBase, mut_id: int):
         nonlocal freqs
         if freqs is None:
             freqs = allele_frequencies(grg)
@@ -196,9 +195,9 @@ def grg_save_freq(
 
 
 def grg_save_mut_filter(
-    grg_or_filename: Union[pygrgl.GRG, str],
+    grg_or_filename: Union[GRGBase, str],
     out_filename: str,
-    mut_filter: Callable[[pygrgl.GRG, int], bool],
+    mut_filter: Callable[[GRGBase, int], bool],
     bp_range: Tuple[int, int] = (0, 0),
     apply_to_sites: bool = False,
     min_variants: int = 0,
@@ -208,13 +207,13 @@ def grg_save_mut_filter(
     Given a GRG filename or object, save a new GRG that contains only the Mutations selected
     by the given filter function.
 
-    :param grg_or_filename: Either a pygrgl.GRG object, or the filename of a GRG.
-    :type grg_or_filename: Union[pygrgl.GRG, str]
+    :param grg_or_filename: Either a GRGBase object, or the filename of a GRG.
+    :type grg_or_filename: Union[GRGBase, str]
     :param out_filename: The filename of the to-be-created GRG.
     :type out_filename: str
     :param mut_filter: Callback (function) that takes a MutationID (int) as input and returns
         true if that mutation should be kept.
-    :type mut_filter: Callable[[pygrgl.GRG, int], bool]
+    :type mut_filter: Callable[[GRGBase, int], bool]
     :param bp_range: The range to associate with the GRG, as metadata. DOES NOT IMPACT THE
         FILTERING AT ALL.
     :type bp_range: Tuple[int, int]
@@ -229,7 +228,7 @@ def grg_save_mut_filter(
     :rtype: Tuple[int, int]
     """
     if isinstance(grg_or_filename, str):
-        grg = pygrgl.load_immutable_grg(grg_or_filename, load_up_edges=False)
+        grg = IMMUTABLE_GRG(grg_or_filename, load_up_edges=False)
     else:
         grg = grg_or_filename
 
@@ -255,10 +254,9 @@ def grg_save_mut_filter(
         raise UserInputError(
             "No Mutations found matching range; cannot filter to an empty GRG."
         )
-    pygrgl.save_subset(
-        grg,
+    grg.save_subset(
         out_filename,
-        pygrgl.TraversalDirection.DOWN,
+        Direction.DOWN,
         seeds,
         bp_range=bp_range,
     )
@@ -266,9 +264,9 @@ def grg_save_mut_filter(
 
 
 def multi_grg_save_mut_filter(
-    grgs_or_filenames: Union[List[pygrgl.GRG], List[str]],
+    grgs_or_filenames: Union[List[GRGBase], List[str]],
     out_filenames: List[str],
-    mut_filter: Callable[[pygrgl.GRG, int, int], bool],
+    mut_filter: Callable[[GRGBase, int, int], bool],
 ):
     """
     Given a list of GRG filenames or GRG objects, save a new GRG for each that contains only the
@@ -276,13 +274,13 @@ def multi_grg_save_mut_filter(
     within that GRG, and the "cumulative MutationID" when considering all GRGs sequentially (e.g.
     the second GRG's mutations start counting right after the last MutationID of the first GRG).
 
-    :param grgs_or_filenames: Either a pygrgl.GRG object, or the filename of a GRG.
-    :type grgs_or_filenames: Union[List[pygrgl.GRG], List[str]]
+    :param grgs_or_filenames: Either a GRGBase object, or the filename of a GRG.
+    :type grgs_or_filenames: Union[List[GRGBase], List[str]]
     :param out_filenames: The list of filenames of the to-be-created GRGs.
     :type out_filename: List[str]
     :param mut_filter: Callback (function) that takes a MutationID (int) as input and returns
         true if that mutation should be kept.
-    :type mut_filter: Callable[[pygrgl.GRG, int, int], bool]
+    :type mut_filter: Callable[[GRGBase, int, int], bool]
     """
     assert len(grgs_or_filenames) > 0
     assert len(grgs_or_filenames) == len(
@@ -291,17 +289,16 @@ def multi_grg_save_mut_filter(
 
     if isinstance(grgs_or_filenames[0], str):
         grgs = [
-            pygrgl.load_immutable_grg(f, load_up_edges=False) for f in grgs_or_filenames
+            IMMUTABLE_GRG(f, load_up_edges=False) for f in grgs_or_filenames
         ]
     else:
-        assert isinstance(grgs_or_filenames[0], pygrgl.GRG)
+        assert isinstance(grgs_or_filenames[0], GRGBase)
         grgs = grgs_or_filenames
 
     def filter_one(grg, seeds, out_filename):
-        pygrgl.save_subset(
-            grg,
+        grg.save_subset(
             out_filename,
-            pygrgl.TraversalDirection.DOWN,
+            Direction.DOWN,
             seeds,
         )
 

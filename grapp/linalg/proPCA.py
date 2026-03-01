@@ -7,7 +7,7 @@ from grapp.util.simple import allele_frequencies
 from numpy.typing import NDArray
 from typing import Tuple, Dict, Any, Union, List
 import numpy as np
-import pygrgl
+from grapp import GRGBase, Direction
 import concurrent.futures
 
 
@@ -60,7 +60,7 @@ def _get_change(C_new: np.ndarray, C_old: np.ndarray) -> float:
 
 
 def get_pcs_propca(
-    grgs: Union[pygrgl.GRG, List[pygrgl.GRG]],
+    grgs: Union[GRGBase, List[GRGBase]],
     k: int = 10,
     l: float = -1,
     g: float = 3,
@@ -93,7 +93,7 @@ def get_pcs_propca(
     if len(grg_list) == 1:
         grg_freqs = allele_frequencies(grg_list[0])
         std_operator = _SciPyStdXOperator(
-            grg_list[0], pygrgl.TraversalDirection.UP, grg_freqs
+            grg_list[0], Direction.UP, grg_freqs
         )
     else:
         executor = concurrent.futures.ThreadPoolExecutor(threads)
@@ -101,7 +101,7 @@ def get_pcs_propca(
         all_freqs = [f.result() for f in futures]
         std_operator = _MultiSciPyStdXOperator(
             grg_list,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             all_freqs,
             threads=threads,
             **op_kwargs,

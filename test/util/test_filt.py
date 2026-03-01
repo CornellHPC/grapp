@@ -5,6 +5,8 @@ from grapp.util.filter import (
     multi_grg_save_mut_filter,
 )
 from grapp.util.simple import allele_counts, allele_frequencies
+from grapp import GRGBase
+from grapp.backends import IMMUTABLE_GRG
 import pygrgl
 import os
 import unittest
@@ -26,14 +28,14 @@ class TestFilter(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.filt.grg")
-        cls.grg = pygrgl.load_immutable_grg(cls.grg_filename, load_up_edges=False)
+        cls.grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=False)
 
     def test_filt_by_freq(self):
         test_filename = "test.filt.freq.grg"
         grg_save_freq(self.grg, test_filename, (0.2, 0.8))
 
         # Read the filtered GRG
-        filt_grg = pygrgl.load_immutable_grg(test_filename, load_up_edges=False)
+        filt_grg = IMMUTABLE_GRG(test_filename, load_up_edges=False)
         counts = allele_counts(filt_grg)
         seen = set()
         for mut_id in range(filt_grg.num_mutations):
@@ -58,7 +60,7 @@ class TestFilter(unittest.TestCase):
 
         test_filename = "test.filt.multi.grg"
 
-        def keep_mut(grg: pygrgl.GRG, mut_id: int):
+        def keep_mut(grg: GRGBase, mut_id: int):
             return (
                 full_freqs[mut_id] >= freq_range[0]
                 and full_freqs[mut_id] < freq_range[1]
@@ -74,7 +76,7 @@ class TestFilter(unittest.TestCase):
             f"test.filt.multi.{i}.grg" for i in range(len(partial_grgs))
         ]
 
-        def keep_mut_multi(grg: pygrgl.GRG, mut_id: int, cumu_id: int):
+        def keep_mut_multi(grg: GRGBase, mut_id: int, cumu_id: int):
             return (
                 full_freqs[cumu_id] >= freq_range[0]
                 and full_freqs[cumu_id] < freq_range[1]
@@ -86,8 +88,8 @@ class TestFilter(unittest.TestCase):
         assert len(partial_filenames) > 0
         subprocess.check_call(["grg", "merge", merged_file] + partial_filenames)
 
-        single_result = pygrgl.load_immutable_grg(test_filename)
-        merged_result = pygrgl.load_immutable_grg(merged_file)
+        single_result = IMMUTABLE_GRG(test_filename)
+        merged_result = IMMUTABLE_GRG(merged_file)
         self.assertEqual(single_result.num_mutations, merged_result.num_mutations)
 
     def test_pop_filter(self):
@@ -103,7 +105,7 @@ class TestFilter(unittest.TestCase):
         pygrgl.save_grg(grg, filename)
         filter_file = "test.pop_filter.POP2.grg"
         grg_save_populations(filename, filter_file, ["POP2"])
-        grg = pygrgl.load_immutable_grg(filter_file)
+        grg = IMMUTABLE_GRG(filter_file)
         self.assertEqual(grg.num_samples, 5)
 
     @classmethod

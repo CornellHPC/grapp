@@ -2,9 +2,10 @@ from grapp.util.igd import (
     export_igd,
     igd_to_vcf,
 )
+from grapp.backends import IMMUTABLE_GRG
+
 import gzip
 import os
-import pygrgl
 import pyigd
 import unittest
 import sys
@@ -22,7 +23,7 @@ class TestIGDAndVCF(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.igd.grg")
-        cls.grg = pygrgl.load_immutable_grg(cls.grg_filename, load_up_edges=False)
+        cls.grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=False)
 
     def test_round_trip_grg_to_igd_to_vcf(self):
         """
@@ -45,7 +46,7 @@ class TestIGDAndVCF(unittest.TestCase):
         new_grg_filename = construct_grg(
             test_vcf_file, "test.igd.roundtrip.grg", is_test_input=False
         )
-        new_grg = pygrgl.load_immutable_grg(new_grg_filename, load_up_edges=False)
+        new_grg = IMMUTABLE_GRG(new_grg_filename, load_up_edges=False)
 
         self.assertEqual(self.grg.num_samples, new_grg.num_samples)
         self.assertEqual(self.grg.ploidy, new_grg.ploidy)

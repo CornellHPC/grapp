@@ -3,11 +3,10 @@ Linear operators that are compatible with scipy.
 """
 
 from scipy.sparse.linalg import LinearOperator
-from pygrgl import TraversalDirection
 from typing import Tuple, Union, List, Optional
 import concurrent.futures
 import numpy
-import pygrgl
+from grapp import GRGBase, Direction
 
 try:
     from typing import TypeAlias  # type: ignore
@@ -15,11 +14,11 @@ except ImportError:
     from typing_extensions import TypeAlias  # type: ignore
 
 
-_DOWN = TraversalDirection.DOWN
-_UP = TraversalDirection.UP
+_DOWN = Direction.DOWN
+_UP = Direction.UP
 
 
-def _flip_dir(direction: TraversalDirection) -> TraversalDirection:
+def _flip_dir(direction: Direction) -> Direction:
     return _UP if direction == _DOWN else _DOWN
 
 
@@ -36,10 +35,10 @@ class SciPyXOperator(LinearOperator):
     Can perform the operation :math:`X \\times A` (_matmat) or :math:`X \\times \\overrightarrow{v}` (_matvec).
 
     :param grg: The GRG the operator will multiply against.
-    :type grg: pygrgl.GRG
-    :param direction: Determines whether the matrix is :math:`X` (pygrgl.TraversalDirection.UP) or
-        :math:`X^T` (pygrgl.TraversalDirection.DOWN).
-    :type direction: pygrgl.TraversalDirection
+    :type grg: GRGBase
+    :param direction: Determines whether the matrix is :math:`X` (Direction.UP) or
+        :math:`X^T` (Direction.DOWN).
+    :type direction: Direction
     :param dtype: The numpy.dtype to use.
     :type dtype: TypeAlias
     :param haploid: Perform calculations on the {0, 1} haploid genotype matrix, instead of the {0, ..., grg.ploidy}
@@ -60,8 +59,8 @@ class SciPyXOperator(LinearOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
-        direction: TraversalDirection,
+        grg: GRGBase,
+        direction: Direction,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
         miss_values: Optional[numpy.typing.NDArray] = None,
@@ -93,7 +92,7 @@ class SciPyXOperator(LinearOperator):
         super().__init__(dtype=dtype, shape=shape)
 
     def _matmat_helper(
-        self, other_matrix: numpy.typing.NDArray, mult_dir: TraversalDirection
+        self, other_matrix: numpy.typing.NDArray, mult_dir: Direction
     ):
         kwargs = {}
         if self.mutation_filter is not None and mult_dir == _DOWN:
@@ -122,8 +121,7 @@ class SciPyXOperator(LinearOperator):
                 M = numpy.zeros((A.shape[0], self.grg.num_mutations))
             kwargs["miss"] = M
 
-        result = pygrgl.matmul(
-            self.grg,
+        result = self.grg.matmul(
             A,
             mult_dir,
             by_individual=not self.haploid,
@@ -167,7 +165,7 @@ class SciPyXTXOperator(LinearOperator):
     :math:`X^T \\times X \\times \\overrightarrow{v}` (_matvec).
 
     :param grg: The GRG the operator will multiply against.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param dtype: The numpy.dtype to use.
     :type dtype: TypeAlias
     :param haploid: Perform calculations on the {0, 1} haploid genotype matrix, instead of the {0, ..., grg.ploidy}
@@ -184,7 +182,7 @@ class SciPyXTXOperator(LinearOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg: GRGBase,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
         miss_values: Optional[numpy.typing.NDArray] = None,
@@ -233,7 +231,7 @@ class SciPyXXTOperator(LinearOperator):
     :math:`X \\times X^T \\times \\overrightarrow{v}` (_matvec).
 
     :param grg: The GRG the operator will multiply against.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param dtype: The numpy.dtype to use.
     :type dtype: TypeAlias
     :param haploid: Perform calculations on the {0, 1} haploid genotype matrix, instead of the {0, ..., grg.ploidy}
@@ -250,7 +248,7 @@ class SciPyXXTOperator(LinearOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg: GRGBase,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
         miss_values: Optional[numpy.typing.NDArray] = None,
@@ -293,7 +291,7 @@ class SciPyXXTOperator(LinearOperator):
 class _SciPyStandardizedOperator(LinearOperator):
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg: GRGBase,
         freqs: numpy.typing.NDArray,
         shape: Tuple[int, int],
         dtype: TypeAlias = numpy.float64,
@@ -333,10 +331,10 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
     Can perform the operation :math:`X \\times A` (_matmat) or :math:`X \\times \\overrightarrow{v}` (_matvec).
 
     :param grg: The GRG the operator will multiply against.
-    :type grg: pygrgl.GRG
-    :param direction: Determines whether the matrix is :math:`X` (pygrgl.TraversalDirection.UP) or
-        :math:`X^T` (pygrgl.TraversalDirection.DOWN).
-    :type direction: pygrgl.TraversalDirection
+    :type grg: GRGBase
+    :param direction: Determines whether the matrix is :math:`X` (Direction.UP) or
+        :math:`X^T` (Direction.DOWN).
+    :type direction: Direction
     :param freqs: A vector of length num_mutations, containing the allele frequency for all mutations.
         Indexed by the mutation ID of the mutation.
     :type freqs: numpy.ndarray
@@ -356,8 +354,8 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
-        direction: pygrgl.TraversalDirection,
+        grg: GRGBase,
+        direction: Direction,
         freqs: numpy.typing.NDArray,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
@@ -402,8 +400,7 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
         with numpy.errstate(divide="raise"):
             if direction == _UP:
                 vS = expandm(other_matrix.T) / self.sigma_corrected
-                XvS = pygrgl.matmul(
-                    self.grg,
+                XvS = self.grg.matmul(
                     vS,
                     mult_dir,
                     by_individual=not self.haploid,
@@ -419,8 +416,7 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
                     m = m.copy() if m is other_matrix.T else m
                     m[:, self.mask_samples] = 0
                 SXv = (
-                    pygrgl.matmul(
-                        self.grg,
+                    self.grg.matmul(
                         m,
                         mult_dir,
                         by_individual=not self.haploid,
@@ -467,7 +463,7 @@ class SciPyStdXTXOperator(LinearOperator):
     :math:`X \\times X \\times \\overrightarrow{v}` (_matvec).
 
     :param grg: The GRG the operator will multiply against.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param freqs: A vector of length num_mutations, containing the allele frequency for all mutations.
         Indexed by the mutation ID of the mutation.
     :type freqs: numpy.ndarray
@@ -483,7 +479,7 @@ class SciPyStdXTXOperator(LinearOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg: GRGBase,
         freqs: numpy.typing.NDArray,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
@@ -536,7 +532,7 @@ class SciPyStdXXTOperator(LinearOperator):
     :math:`X \\times X^T \\times \\overrightarrow{v}` (_matvec).
 
     :param grg: The GRG the operator will multiply against.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param freqs: A vector of length num_mutations, containing the allele frequency for all mutations.
         Indexed by the mutation ID of the mutation.
     :type freqs: numpy.ndarray
@@ -549,7 +545,7 @@ class SciPyStdXXTOperator(LinearOperator):
 
     def __init__(
         self,
-        grg: pygrgl.GRG,
+        grg: GRGBase,
         freqs: numpy.typing.NDArray,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
@@ -585,10 +581,10 @@ class MultiSciPyXOperator(LinearOperator):
 
     :param grgs: The GRGs the operator will multiply against. They must all have the same samples,
         and the mutations are expected to differ (e.g., one GRG per chromosome of the same dataset).
-    :type grgs: List[pygrgl.GRG]
-    :param direction: Determines whether the matrix is :math:`X` (pygrgl.TraversalDirection.UP) or
-        :math:`X^T` (pygrgl.TraversalDirection.DOWN).
-    :type direction: pygrgl.TraversalDirection
+    :type grgs: List[GRGBase]
+    :param direction: Determines whether the matrix is :math:`X` (Direction.UP) or
+        :math:`X^T` (Direction.DOWN).
+    :type direction: Direction
     :param dtype: The numpy.dtype to use.
     :type dtype: TypeAlias
     :param haploid: Perform calculations on the {0, 1} haploid genotype matrix, instead of the {0, ..., grg.ploidy}
@@ -608,8 +604,8 @@ class MultiSciPyXOperator(LinearOperator):
 
     def __init__(
         self,
-        grgs: List[pygrgl.GRG],
-        direction: pygrgl.TraversalDirection,
+        grgs: List[GRGBase],
+        direction: Direction,
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
         miss_values: Optional[numpy.typing.NDArray] = None,
@@ -671,7 +667,7 @@ class MultiSciPyXOperator(LinearOperator):
                 )
             prev_max_mut += g.num_mutations
         # Should we concatenate the result for _matmat, or add them together?
-        self.concat = self.direction == pygrgl.TraversalDirection.DOWN
+        self.concat = self.direction == Direction.DOWN
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=threads)
         sample_count = num_samples if haploid else num_indivs
         shape = (sample_count, self.num_mutations)
@@ -683,7 +679,7 @@ class MultiSciPyXOperator(LinearOperator):
         # For UP, we have "(N x M) x (M x k)", so we need to split the other_matrix into chunks of the
         # appropriate size <= M.
         futures = []
-        if direction == pygrgl.TraversalDirection.UP:
+        if direction == Direction.UP:
             start = 0
             for op in self.operators:
                 end = start + op.shape[1]
@@ -732,7 +728,7 @@ class MultiSciPyXTXOperator(LinearOperator):
 
     :param grgs: The GRGs the operator will multiply against. They must all have the same samples,
         and the mutations are expected to differ (e.g., one GRG per chromosome of the same dataset).
-    :type grgs: List[pygrgl.GRG]
+    :type grgs: List[GRGBase]
     :param dtype: The numpy.dtype to use.
     :type dtype: TypeAlias
     :param haploid: Perform calculations on the {0, 1} haploid genotype matrix, instead of the {0, ..., grg.ploidy}
@@ -752,7 +748,7 @@ class MultiSciPyXTXOperator(LinearOperator):
 
     def __init__(
         self,
-        grgs: List[pygrgl.GRG],
+        grgs: List[GRGBase],
         dtype=numpy.float64,
         haploid: bool = False,
         miss_values: Optional[numpy.typing.NDArray] = None,
@@ -761,7 +757,7 @@ class MultiSciPyXTXOperator(LinearOperator):
     ):
         self.x_op = MultiSciPyXOperator(
             grgs,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             dtype=dtype,
             haploid=haploid,
             miss_values=miss_values,
@@ -797,10 +793,10 @@ class MultiSciPyStdXOperator(LinearOperator):
 
     :param grgs: The GRGs the operator will multiply against. They must all have the same samples,
         and the mutations are expected to differ (e.g., one GRG per chromosome of the same dataset).
-    :type grgs: List[pygrgl.GRG]
-    :param direction: Determines whether the matrix is :math:`X` (pygrgl.TraversalDirection.UP) or
-        :math:`X^T` (pygrgl.TraversalDirection.DOWN).
-    :type direction: pygrgl.TraversalDirection
+    :type grgs: List[GRGBase]
+    :param direction: Determines whether the matrix is :math:`X` (Direction.UP) or
+        :math:`X^T` (Direction.DOWN).
+    :type direction: Direction
     :param dtype: The numpy.dtype to use.
     :type dtype: TypeAlias
     :param haploid: Perform calculations on the {0, 1} haploid genotype matrix, instead of the {0, ..., grg.ploidy}
@@ -816,8 +812,8 @@ class MultiSciPyStdXOperator(LinearOperator):
 
     def __init__(
         self,
-        grgs: List[pygrgl.GRG],
-        direction: pygrgl.TraversalDirection,
+        grgs: List[GRGBase],
+        direction: Direction,
         freqs: List[numpy.typing.NDArray],
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
@@ -869,7 +865,7 @@ class MultiSciPyStdXOperator(LinearOperator):
                 )
             prev_max_mut += g.num_mutations
         # Should we concatenate the result for _matmat, or add them together?
-        self.concat = self.direction == pygrgl.TraversalDirection.DOWN
+        self.concat = self.direction == Direction.DOWN
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=threads)
         sample_count = num_samples if haploid else num_indivs
         shape = (sample_count, self.num_mutations)
@@ -881,7 +877,7 @@ class MultiSciPyStdXOperator(LinearOperator):
         # For UP, we have "(N x M) x (M x k)", so we need to split the other_matrix into chunks of the
         # appropriate size <= M.
         futures = []
-        if direction == pygrgl.TraversalDirection.UP:
+        if direction == Direction.UP:
             start = 0
             for op in self.operators:
                 end = start + op.shape[1]
@@ -932,7 +928,7 @@ class MultiSciPyStdXTXOperator(LinearOperator):
 
     :param grgs: The GRGs the operator will multiply against. They must all have the same samples,
         and the mutations are expected to differ (e.g., one GRG per chromosome of the same dataset).
-    :type grgs: List[pygrgl.GRG]
+    :type grgs: List[GRGBase]
     :param dtype: The numpy.dtype to use.
     :type dtype: TypeAlias
     :param haploid: Perform calculations on the {0, 1} haploid genotype matrix, instead of the {0, ..., grg.ploidy}
@@ -948,7 +944,7 @@ class MultiSciPyStdXTXOperator(LinearOperator):
 
     def __init__(
         self,
-        grgs: List[pygrgl.GRG],
+        grgs: List[GRGBase],
         freqs: List[numpy.typing.NDArray],
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
@@ -957,7 +953,7 @@ class MultiSciPyStdXTXOperator(LinearOperator):
     ):
         self.std_x_op = MultiSciPyStdXOperator(
             grgs,
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             freqs,
             haploid=haploid,
             dtype=dtype,

@@ -4,7 +4,7 @@ Simple utility functions.
 
 from enum import Enum
 from typing import Union, Tuple, List
-import pygrgl
+from grapp import GRGBase, Direction
 import numpy
 
 
@@ -35,7 +35,7 @@ def _div_or_default(a, b, d):
 
 
 def allele_counts(
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     return_missing: bool = False,
     mask_samples: Union[List[int], numpy.typing.NDArray] = [],
 ) -> Union[numpy.typing.NDArray, Tuple[numpy.typing.NDArray, numpy.typing.NDArray]]:
@@ -43,7 +43,7 @@ def allele_counts(
     Get the allele counts for the mutations in the given GRG.
 
     :param grg: The GRG.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param return_missing: Return two arrays: the allele counts, and the missingness counts.
     :type return_missing: bool
     :param sample_filter: Optional. Restrict the counts to a subset of samples, listed by sample node ID.
@@ -66,7 +66,7 @@ def allele_counts(
     input_mat = numpy.ones((1, grg.num_samples), dtype=numpy.int32)
     if mask_samples:
         input_mat[:, mask_samples] = 0
-    acounts = pygrgl.matmul(grg, input_mat, pygrgl.TraversalDirection.UP, **kwargs)[0]
+    acounts = grg.matmul(input_mat, Direction.UP, **kwargs)[0]
     if miss_counts is not None:
         miss_counts = miss_counts[0]
         assert miss_counts is not None
@@ -75,7 +75,7 @@ def allele_counts(
 
 
 def allele_frequencies(
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     adjust_missing: bool = False,
     mask_samples: Union[List[int], numpy.typing.NDArray] = [],
 ) -> numpy.typing.NDArray:
@@ -83,7 +83,7 @@ def allele_frequencies(
     Get the allele frequencies for the mutations in the given GRG.
 
     :param grg: The GRG.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param adjust_missing: Optional. Set to true to adjust each allele frequncies to be
         :math:`\\frac{count_i}{total - missing_i}` instead of :math:`\\frac{count_i}{total}`.
     :type adjust_missing: bool
@@ -114,7 +114,7 @@ def allele_frequencies(
 
 
 def variance(
-    grg: pygrgl.GRG,
+    grg: GRGBase,
     dist: str = _GenotypeDist.BINOMIAL.value,
     adjust_missing: bool = False,
     mask_samples: Union[List[int], numpy.typing.NDArray] = [],
@@ -125,7 +125,7 @@ def variance(
     between the sample variance and the binomial variance.
 
     :param grg: The GRG.
-    :type grg: pygrgl.GRG
+    :type grg: GRGBase
     :param dist: Either "sample" or "binomial".
     :type dist: str
     :param adjust_missing: Optional. Set to true to adjust each allele frequncy to be
@@ -153,10 +153,9 @@ def variance(
         ), "The sample-based variance can only be computed for diploids"
         # diag(X^T @ X) / n = Var[X] + E[X]^2
         # --> Var[X] = (diag(X^T @ X) / n) - E[X]^2
-        XX = pygrgl.matmul(
-            grg,
+        XX = grg.matmul(
             numpy.ones((1, grg.num_samples), dtype=numpy.int32),
-            pygrgl.TraversalDirection.UP,
+            Direction.UP,
             init="xtx",
         )[0]
         return (XX / grg.num_individuals) - ((mult_const * afreq) ** 2)
