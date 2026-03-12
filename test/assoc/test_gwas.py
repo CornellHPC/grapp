@@ -10,6 +10,7 @@ from collections import defaultdict
 from grapp.assoc import linear_assoc_no_covar, linear_assoc_covar, read_pheno
 from grapp.linalg import PCs
 from grapp.util.filter import grg_save_samples
+from grapp.backends import HAS_MKL, HAS_CUSPARSE
 
 THIS_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(THIS_DIR, ".."))
@@ -216,10 +217,20 @@ class TestGWAS_ImmutableGRG(_GWASTestBase, unittest.TestCase):
     BACKEND_KWARGS = {"load_up_edges": True}
 
 
+@unittest.skipUnless(HAS_MKL, "MKL not available")
 class TestGWAS_SPMV_MKL(_GWASTestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_MKL
     BACKEND_CLASS = SPMV_GRG_MKL
     BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+    @unittest.skip("save_subset not supported for SPMV_GRG")
+    def test_gwas_no_covar_missing_Y(self):
+        pass
+
+@unittest.skipUnless(HAS_CUSPARSE, "cuSPARSE not available")
+class TestGWAS_SPMV_cuSparse(_GWASTestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_cuSparse
+    BACKEND_CLASS = SPMV_GRG_cuSparse
+    BACKEND_KWARGS = {"load_up_edges": True}
     @unittest.skip("save_subset not supported for SPMV_GRG")
     def test_gwas_no_covar_missing_Y(self):
         pass

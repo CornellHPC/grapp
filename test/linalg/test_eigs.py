@@ -15,6 +15,7 @@ import sys
 THIS_DIR = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(THIS_DIR, ".."))
 from testing_utils import construct_grg, grg2X, standardize_X
+from grapp.backends import HAS_MKL, HAS_CUSPARSE
 
 JOBS = 4
 CLEANUP = True
@@ -85,10 +86,21 @@ class TestPCA_ImmutableGRG(_PCATestBase, unittest.TestCase):
     def GRG_TO_DENSE_METHOD(grg, diploid=True):
         return grg2X(grg, diploid)
 
+@unittest.skipUnless(HAS_MKL, "MKL not available")
 class TestPCA_SPMV_MKL(_PCATestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_MKL
     BACKEND_CLASS = SPMV_GRG_MKL
     BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+
+    @staticmethod
+    def GRG_TO_DENSE_METHOD(grg, diploid=True):
+        return grg2X(grg._grg, diploid)
+
+@unittest.skipUnless(HAS_CUSPARSE, "cuSPARSE not available")
+class TestPCA_SPMV_cuSparse(_PCATestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_cuSparse
+    BACKEND_CLASS = SPMV_GRG_cuSparse
+    BACKEND_KWARGS = {"load_up_edges": True}
 
     @staticmethod
     def GRG_TO_DENSE_METHOD(grg, diploid=True):

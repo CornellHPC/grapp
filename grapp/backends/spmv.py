@@ -3,6 +3,7 @@ import numpy as np
 import pygrgl
 from pygrgl_spmv import SpmvGRG
 from pygrgl_spmv.backends.mkl import MklPlan
+from pygrgl_spmv.backends.cusparse import CusparsePlan
 
 
 class SPMV_GRG(GRGBase):
@@ -139,6 +140,39 @@ class SPMV_GRG_MKL(SPMV_GRG):
                 "type": "mkl",
                 "plan_up": MklPlan.from_any({"k_hint": None, "store": "N", "fmt": "CSR", "n_threads": nthreads}),
                 "plan_down": MklPlan.from_any({"k_hint": None, "store": "T", "fmt": "CSC", "n_threads": nthreads}),
+            },
+            np.float64,
+            np.uintp,
+            cache_dir="pygrgl_spmv_cache",
+        )
+        super().__init__(file, op=op, load_up_edges=load_up_edges)
+
+class SPMV_GRG_cuSparse(SPMV_GRG):
+    def __init__(self, file, load_up_edges=True):
+        op = SpmvGRG(
+            file,
+            {
+                "type": "cusparse",
+                "plan_up": CusparsePlan.from_any({
+                    "k_hint": 1, 
+                    "store": "N", 
+                    "fmt": "CSR", 
+                    "opA": "N",
+                    "opB": "N",
+                    "orderB": "ROW",
+                    "orderC": "ROW",
+                    "algo": "DEFAULT",
+                }),
+                "plan_down": CusparsePlan.from_any({
+                    "k_hint": 1,
+                    "store": "T",
+                    "fmt": "CSC",
+                    "opA": "N",
+                    "opB": "N",
+                    "orderB": "ROW",
+                    "orderC": "ROW",
+                    "algo": "DEFAULT",
+                }),
             },
             np.float64,
             np.uintp,
