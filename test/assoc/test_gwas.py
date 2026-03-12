@@ -234,3 +234,176 @@ class TestGWAS_SPMV_cuSparse(_GWASTestBase, unittest.TestCase):
     @unittest.skip("save_subset not supported for SPMV_GRG")
     def test_gwas_no_covar_missing_Y(self):
         pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stress Test: Compare backends against IMMUTABLE_GRG ground truth
+# ══════════════════════════════════════════════════════════════════════════════
+# Controlled by environment variables:
+#   GRAPP_GWAS_STRESS_TEST_INPUT  - GRG input file (VCF or GRG)
+#   GRAPP_GWAS_STRESS_TEST_PHENO  - Phenotype file (optional, random if not set)
+#   GRAPP_GWAS_STRESS_TEST_RUNS   - Number of test iterations (default: 100)
+# ══════════════════════════════════════════════════════════════════════════════
+
+GWAS_STRESS_INPUT = os.environ.get("GRAPP_STRESS_TEST_INPUT")
+GWAS_STRESS_PHENO = os.environ.get("GRAPP_STRESS_TEST_PHENO")
+GWAS_STRESS_RUNS = int(os.environ.get("GRAPP_STRESS_TEST_RUNS", "100"))
+
+
+class _GWASStressTestBase:
+    """Base class for stress tests comparing backends against IMMUTABLE_GRG."""
+
+    BACKEND_CLASS = None
+    BACKEND_KWARGS = {}
+
+    @classmethod
+    def setUpClass(cls):
+        from grapp.backends import IMMUTABLE_GRG
+        
+        # Construct GRG from input file
+        input_file = GWAS_STRESS_INPUT
+        is_grg = input_file.endswith('.grg')
+        
+        if is_grg:
+            cls.grg_filename = input_file
+        else:
+            # Construct from VCF
+            cls.grg_filename = construct_grg(
+                input_file,
+                output_file=f"{os.path.basename(input_file)}.gwas_stress.grg",
+                is_test_input=False
+            )
+        
+        # Create ground truth backend (IMMUTABLE_GRG)
+        cls.grg_truth = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=True)
+        
+        # Create test backend
+        cls.grg_test = cls.BACKEND_CLASS(cls.grg_filename, **cls.BACKEND_KWARGS)
+        
+        # Load or generate phenotypes
+        if GWAS_STRESS_PHENO and os.path.exists(GWAS_STRESS_PHENO):
+            cls.Y = read_pheno(GWAS_STRESS_PHENO)
+        else:
+            # Generate random phenotypes
+            numpy.random.seed(12345)
+            cls.Y = numpy.random.randn(cls.grg_truth.num_individuals)
+        
+        # Compute ground truth results ONCE
+        print(f"\n{'='*80}")
+        print(f"GWAS STRESS TEST CONFIGURATION:")
+        print(f"  Input file:      {cls.grg_filename}")
+        print(f"  Num samples:     {cls.grg_truth.num_samples}")
+        print(f"  Num individuals: {cls.grg_truth.num_individuals}")
+        print(f"  Num mutations:   {cls.grg_truth.num_mutations}")
+        print(f"  Phenotype file:  {GWAS_STRESS_PHENO or 'random'}")
+        print(f"  Test runs:       {GWAS_STRESS_RUNS}")
+        print(f"  Backend:         {cls.BACKEND_CLASS.__name__}")
+        print(f"{'='*80}")
+        
+        # Pre-compute ground truth for GWAS without covariates
+        print("Computing ground truth GWAS (no covariates)...", flush=True)
+        cls.truth_gwas_no_covar = linear_assoc_no_covar(cls.grg_truth, cls.Y)
+        
+        # Pre-compute ground truth for GWAS with covariates (10 PCs)
+        print("Computing ground truth GWAS (with covariates)...", flush=True)
+        numpy.random.seed(42)
+        cls.C = PCs(cls.grg_truth, 10, unitvar=False).to_numpy()
+        cls.truth_gwas_covar = linear_assoc_covar(cls.grg_truth, cls.Y, cls.C)
+        
+        print("Ground truth computed.\n", flush=True)
+
+    def test_stress_gwas_no_covar(self):
+        """Run GWAS without covariates multiple times and verify consistency."""
+        for run in range(GWAS_STRESS_RUNS):
+            # Compute with test backend
+            test_gwas = linear_assoc_no_covar(self.grg_test, self.Y)
+            
+            # Verify same number of mutations
+            self.assertEqual(len(test_gwas), len(self.truth_gwas_no_covar))
+            
+            # Compare columns: COUNT, BETA, SE, T, P (vectorized comparison)
+            for col in ["COUNT", "BETA", "SE", "T", "P"]:
+                truth_col = self.truth_gwas_no_covar[col].to_numpy()
+                test_col = test_gwas[col].to_numpy()
+                
+                # Check that NaNs match
+                truth_nans = numpy.isnan(truth_col)
+                test_nans = numpy.isnan(test_col)
+                if not numpy.array_equal(truth_nans, test_nans):
+                    # Find first mismatch for error message
+                    mismatch_idx = numpy.where(truth_nans != test_nans)[0][0]
+                    self.fail(f"Run {run + 1}: Row {mismatch_idx}, col {col}: "
+                             f"NaN mismatch (truth={truth_col[mismatch_idx]}, test={test_col[mismatch_idx]})")
+                
+                # Compare non-NaN values (vectorized)
+                valid_mask = ~truth_nans
+                if valid_mask.any():
+                    numpy.testing.assert_allclose(
+                        truth_col[valid_mask],
+                        test_col[valid_mask],
+                        rtol=1e-3,
+                        atol=1e-5,
+                        err_msg=f"Run {run + 1}: {col} values differ"
+                    )
+            
+            if (run + 1) % 10 == 0:  # Print every 10 runs
+                print(f"  ✓ GWAS (no covar) run {run + 1}/{GWAS_STRESS_RUNS} passed", flush=True)
+
+    def test_stress_gwas_with_covar(self):
+        """Run GWAS with covariates multiple times and verify consistency."""
+        for run in range(GWAS_STRESS_RUNS):
+            # Use same seed as ground truth
+            numpy.random.seed(42)
+            
+            # Compute with test backend
+            test_gwas = linear_assoc_covar(self.grg_test, self.Y, self.C)
+            
+            # Verify same number of mutations
+            self.assertEqual(len(test_gwas), len(self.truth_gwas_covar))
+            
+            # Compare BETA and P values (main columns of interest)
+            for col in ["BETA", "P"]:
+                truth_col = self.truth_gwas_covar[col].to_numpy()
+                test_col = test_gwas[col].to_numpy()
+                
+                # Count NaNs - should be similar
+                truth_nans = numpy.isnan(truth_col).sum()
+                test_nans = numpy.isnan(test_col).sum()
+                self.assertLess(abs(truth_nans - test_nans), 10,
+                              f"Run {run + 1}: {col} has different NaN counts: truth={truth_nans}, test={test_nans}")
+                
+                # Compare non-NaN values
+                valid_mask = ~(numpy.isnan(truth_col) | numpy.isnan(test_col))
+                if valid_mask.any():
+                    numpy.testing.assert_allclose(
+                        truth_col[valid_mask],
+                        test_col[valid_mask],
+                        rtol=1e-3,
+                        atol=1e-5,
+                        err_msg=f"Run {run + 1}: {col} values differ"
+                    )
+            
+            if (run + 1) % 10 == 0:  # Print every 10 runs
+                print(f"  ✓ GWAS (with covar) run {run + 1}/{GWAS_STRESS_RUNS} passed", flush=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Only clean up if we constructed the GRG (not if using existing .grg)
+        if CLEANUP and not GWAS_STRESS_INPUT.endswith('.grg'):
+            if os.path.exists(cls.grg_filename):
+                os.remove(cls.grg_filename)
+
+
+@unittest.skipUnless(GWAS_STRESS_INPUT and HAS_MKL, "GWAS stress test disabled or MKL not available")
+class TestGWASStress_SPMV_MKL(_GWASStressTestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_MKL
+    BACKEND_CLASS = SPMV_GRG_MKL
+    BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+
+
+@unittest.skipUnless(GWAS_STRESS_INPUT and HAS_CUSPARSE, "GWAS stress test disabled or cuSPARSE not available")
+class TestGWASStress_SPMV_cuSparse(_GWASStressTestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_cuSparse
+    BACKEND_CLASS = SPMV_GRG_cuSparse
+    BACKEND_KWARGS = {"load_up_edges": True}
+
