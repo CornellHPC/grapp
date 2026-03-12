@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from collections import defaultdict
 
-from grapp.backends import IMMUTABLE_GRG
 from grapp.assoc import linear_assoc_no_covar, linear_assoc_covar, read_pheno
 from grapp.linalg import PCs
 from grapp.util.filter import grg_save_samples
@@ -20,11 +19,15 @@ CLEANUP = True
 INPUT_DIR = os.path.join(THIS_DIR, "input")
 
 
-class TestGWAS(unittest.TestCase):
+class _GWASTestBase:
+
+    BACKEND_CLASS = None
+    BACKEND_KWARGS = {}
+
     @classmethod
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.gwas.grg")
-        cls.grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=True)
+        cls.grg = cls.BACKEND_CLASS(cls.grg_filename, **cls.BACKEND_KWARGS)
         cls.pheno_path = os.path.join(INPUT_DIR, "phenotypes.txt")
         assert os.path.isfile(cls.pheno_path)
 
@@ -142,7 +145,7 @@ class TestGWAS(unittest.TestCase):
         # Create the filtered GRG by just removing the individuals with missing Y
         filt_name = "test.gwas.missingY.grg"
         grg_save_samples(self.grg, filt_name, keep_samples)
-        filt_grg = IMMUTABLE_GRG(filt_name, load_up_edges=False)
+        filt_grg = self.BACKEND_CLASS(filt_name, load_up_edges=False)
         self.assertEqual(filt_grg.num_individuals, Y_kept.shape[0])
 
         # Use binomial estimates
@@ -206,3 +209,17 @@ class TestGWAS(unittest.TestCase):
     def tearDownClass(cls):
         if CLEANUP:
             os.remove(cls.grg_filename)
+
+class TestGWAS_ImmutableGRG(_GWASTestBase, unittest.TestCase):
+    from grapp.backends import IMMUTABLE_GRG
+    BACKEND_CLASS = IMMUTABLE_GRG
+    BACKEND_KWARGS = {"load_up_edges": True}
+
+
+class TestGWAS_SPMV_MKL(_GWASTestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_MKL
+    BACKEND_CLASS = SPMV_GRG_MKL
+    BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+    @unittest.skip("save_subset not supported for SPMV_GRG")
+    def test_gwas_no_covar_missing_Y(self):
+        pass

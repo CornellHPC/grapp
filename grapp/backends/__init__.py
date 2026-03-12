@@ -6,4 +6,10 @@ try:
 except ImportError:
     pass
 
+try:
+    from .spmv import SPMV_GRG
+    __all__.append("SPMV_GRG")
+except ImportError:
+    pass
+
 

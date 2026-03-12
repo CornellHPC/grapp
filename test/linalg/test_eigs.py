@@ -5,7 +5,6 @@ from grapp.linalg import (
     get_pcs_propca,
     sort_by_eigvalues,
 )
-from grapp.backends import IMMUTABLE_GRG
 
 import numpy
 import os
@@ -24,15 +23,20 @@ THIS_DIR = os.path.dirname(os.path.realpath(__file__))
 INPUT_DIR = os.path.join(THIS_DIR, "input")
 
 
-class TestPCA(unittest.TestCase):
+class _PCATestBase:
+
+    BACKEND_CLASS = None
+    BACKEND_KWARGS = {}
+    GRG_TO_DENSE_METHOD = None
+
     @classmethod
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.pca.grg")
         # Up edges needed for grg2X
-        cls.grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=False)
+        cls.grg = cls.BACKEND_CLASS(cls.grg_filename, **cls.BACKEND_KWARGS)
 
     def test_eigvals(self):
-        X_stand = standardize_X(grg2X(self.grg, diploid=True))
+        X_stand = standardize_X(self.GRG_TO_DENSE_METHOD(self.grg, diploid=True))
 
         D = X_stand.T @ X_stand
         evals, evects = scipy_eigs(D, k=15, which="LR")
@@ -71,3 +75,21 @@ class TestPCA(unittest.TestCase):
     def tearDownClass(cls):
         if CLEANUP:
             os.remove(cls.grg_filename)
+
+class TestPCA_ImmutableGRG(_PCATestBase, unittest.TestCase):
+    from grapp.backends import IMMUTABLE_GRG
+    BACKEND_CLASS = IMMUTABLE_GRG
+    BACKEND_KWARGS = {"load_up_edges": True}
+    
+    @staticmethod
+    def GRG_TO_DENSE_METHOD(grg, diploid=True):
+        return grg2X(grg, diploid)
+
+class TestPCA_SPMV_MKL(_PCATestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_MKL
+    BACKEND_CLASS = SPMV_GRG_MKL
+    BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+
+    @staticmethod
+    def GRG_TO_DENSE_METHOD(grg, diploid=True):
+        return grg2X(grg._grg, diploid)
