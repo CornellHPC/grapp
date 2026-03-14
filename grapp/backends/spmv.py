@@ -165,9 +165,9 @@ class SPMV_GRG_cuSparse(SPMV_GRG):
                 }),
                 "plan_down": CusparsePlan.from_any({
                     "k_hint": 1,
-                    "store": "T",
-                    "fmt": "CSC",
-                    "opA": "N",
+                    "store": "N",
+                    "fmt": "CSR",
+                    "opA": "T",
                     "opB": "N",
                     "orderB": "ROW",
                     "orderC": "ROW",

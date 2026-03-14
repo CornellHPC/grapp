@@ -240,9 +240,9 @@ class TestGWAS_SPMV_cuSparse(_GWASTestBase, unittest.TestCase):
 # Stress Test: Compare backends against IMMUTABLE_GRG ground truth
 # ══════════════════════════════════════════════════════════════════════════════
 # Controlled by environment variables:
-#   GRAPP_GWAS_STRESS_TEST_INPUT  - GRG input file (VCF or GRG)
-#   GRAPP_GWAS_STRESS_TEST_PHENO  - Phenotype file (optional, random if not set)
-#   GRAPP_GWAS_STRESS_TEST_RUNS   - Number of test iterations (default: 100)
+#   GRAPP_STRESS_TEST_INPUT  - GRG input file (VCF or GRG)
+#   GRAPP_STRESS_TEST_PHENO  - Phenotype file (optional, random if not set)
+#   GRAPP_STRESS_TEST_RUNS   - Number of test iterations (default: 100)
 # ══════════════════════════════════════════════════════════════════════════════
 
 GWAS_STRESS_INPUT = os.environ.get("GRAPP_STRESS_TEST_INPUT")
