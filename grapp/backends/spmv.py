@@ -148,13 +148,13 @@ class SPMV_GRG_MKL(SPMV_GRG):
         super().__init__(file, op=op, load_up_edges=load_up_edges)
 
 class SPMV_GRG_cuSparse(SPMV_GRG):
-    def __init__(self, file, load_up_edges=True):
+    def __init__(self, file, load_up_edges=True, k_hint=1):
         op = SpmvGRG(
             file,
             {
                 "type": "cusparse",
                 "plan_up": CusparsePlan.from_any({
-                    "k_hint": 1, 
+                    "k_hint": k_hint, 
                     "store": "N", 
                     "fmt": "CSR", 
                     "opA": "N",
@@ -164,7 +164,7 @@ class SPMV_GRG_cuSparse(SPMV_GRG):
                     "algo": "DEFAULT",
                 }),
                 "plan_down": CusparsePlan.from_any({
-                    "k_hint": 1,
+                    "k_hint": k_hint,
                     "store": "N",
                     "fmt": "CSR",
                     "opA": "T",
