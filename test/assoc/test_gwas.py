@@ -221,7 +221,7 @@ class TestGWAS_ImmutableGRG(_GWASTestBase, unittest.TestCase):
 class TestGWAS_SPMV_MKL(_GWASTestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_MKL
     BACKEND_CLASS = SPMV_GRG_MKL
-    BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+    BACKEND_KWARGS = {"nthreads": 64}
     @unittest.skip("save_subset not supported for SPMV_GRG")
     def test_gwas_no_covar_missing_Y(self):
         pass
@@ -230,7 +230,7 @@ class TestGWAS_SPMV_MKL(_GWASTestBase, unittest.TestCase):
 class TestGWAS_SPMV_cuSparse(_GWASTestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_cuSparse
     BACKEND_CLASS = SPMV_GRG_cuSparse
-    BACKEND_KWARGS = {"load_up_edges": True}
+    BACKEND_KWARGS = {}
     @unittest.skip("save_subset not supported for SPMV_GRG")
     def test_gwas_no_covar_missing_Y(self):
         pass
@@ -398,12 +398,12 @@ class _GWASStressTestBase:
 class TestGWASStress_SPMV_MKL(_GWASStressTestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_MKL
     BACKEND_CLASS = SPMV_GRG_MKL
-    BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+    BACKEND_KWARGS = {"nthreads": 64}
 
 
 @unittest.skipUnless(GWAS_STRESS_INPUT and HAS_CUSPARSE, "GWAS stress test disabled or cuSPARSE not available")
 class TestGWASStress_SPMV_cuSparse(_GWASStressTestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_cuSparse
     BACKEND_CLASS = SPMV_GRG_cuSparse
-    BACKEND_KWARGS = {"load_up_edges": True}
+    BACKEND_KWARGS = {}
 

@@ -4,3 +4,4 @@ __pycache__/
 build/
 dist/
 pygrgl_spmv_cache/
+pygrgl_spmv_artifacts/

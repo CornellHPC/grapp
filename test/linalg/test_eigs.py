@@ -28,16 +28,17 @@ class _PCATestBase:
 
     BACKEND_CLASS = None
     BACKEND_KWARGS = {}
-    GRG_TO_DENSE_METHOD = None
 
     @classmethod
     def setUpClass(cls):
         cls.grg_filename = construct_grg("test-200-samples.vcf.gz", "test.pca.grg")
         # Up edges needed for grg2X
         cls.grg = cls.BACKEND_CLASS(cls.grg_filename, **cls.BACKEND_KWARGS)
+        from grapp.backends.grgl import IMMUTABLE_GRG
+        cls.immutable_grg = IMMUTABLE_GRG(cls.grg_filename, load_up_edges=True)
 
     def test_eigvals(self):
-        X_stand = standardize_X(self.GRG_TO_DENSE_METHOD(self.grg, diploid=True))
+        X_stand = standardize_X(grg2X(self.immutable_grg, diploid=True))
 
         D = X_stand.T @ X_stand
         evals, evects = scipy_eigs(D, k=15, which="LR")
@@ -81,30 +82,18 @@ class TestPCA_ImmutableGRG(_PCATestBase, unittest.TestCase):
     from grapp.backends import IMMUTABLE_GRG
     BACKEND_CLASS = IMMUTABLE_GRG
     BACKEND_KWARGS = {"load_up_edges": True}
-    
-    @staticmethod
-    def GRG_TO_DENSE_METHOD(grg, diploid=True):
-        return grg2X(grg, diploid)
 
 @unittest.skipUnless(HAS_MKL, "MKL not available")
 class TestPCA_SPMV_MKL(_PCATestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_MKL
     BACKEND_CLASS = SPMV_GRG_MKL
-    BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
-
-    @staticmethod
-    def GRG_TO_DENSE_METHOD(grg, diploid=True):
-        return grg2X(grg._grg, diploid)
+    BACKEND_KWARGS = {"nthreads": 64}
 
 @unittest.skipUnless(HAS_CUSPARSE, "cuSPARSE not available")
 class TestPCA_SPMV_cuSparse(_PCATestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_cuSparse
     BACKEND_CLASS = SPMV_GRG_cuSparse
-    BACKEND_KWARGS = {"load_up_edges": True}
-
-    @staticmethod
-    def GRG_TO_DENSE_METHOD(grg, diploid=True):
-        return grg2X(grg._grg, diploid)
+    BACKEND_KWARGS = {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -234,11 +223,11 @@ class _PCAStressTestBase:
 class TestPCAStress_SPMV_MKL(_PCAStressTestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_MKL
     BACKEND_CLASS = SPMV_GRG_MKL
-    BACKEND_KWARGS = {"load_up_edges": True, "nthreads": 64}
+    BACKEND_KWARGS = {"nthreads": 64}
 
 
 @unittest.skipUnless(STRESS_INPUT and HAS_CUSPARSE, "Stress test disabled or cuSPARSE not available")
 class TestPCAStress_SPMV_cuSparse(_PCAStressTestBase, unittest.TestCase):
     from grapp.backends.spmv import SPMV_GRG_cuSparse
     BACKEND_CLASS = SPMV_GRG_cuSparse
-    BACKEND_KWARGS = {"load_up_edges": True}
+    BACKEND_KWARGS = {}
