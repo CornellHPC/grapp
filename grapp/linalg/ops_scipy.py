@@ -600,6 +600,9 @@ class MultiSciPyXOperator(LinearOperator):
     :param threads: Number of threads for performing the multiplication. Each GRG can be done in
         parallel.
     :type threads: int
+    :param mode: Execution mode for parallelism. One of "concurrent" (thread pool), or "sequential".
+        Default: "concurrent".
+    :type mode: str
     """
 
     def __init__(
@@ -611,6 +614,7 @@ class MultiSciPyXOperator(LinearOperator):
         miss_values: Optional[numpy.typing.NDArray] = None,
         mutation_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
+        mode: str = "concurrent",
     ):
         if isinstance(mutation_filter, numpy.ndarray):
             mutation_filter = mutation_filter.tolist()
@@ -618,6 +622,10 @@ class MultiSciPyXOperator(LinearOperator):
         self.direction = direction
         self.num_mutations = sum([g.num_mutations for g in grgs])
         self.mutation_filter = mutation_filter
+
+        assert mode in ["concurrent", "sequential", "overlap"], "Invalid mode"
+        self.mode = mode
+
         if self.mutation_filter is not None:
             assert len(self.mutation_filter) <= self.num_mutations
             self.num_mutations = len(self.mutation_filter)
@@ -668,7 +676,8 @@ class MultiSciPyXOperator(LinearOperator):
             prev_max_mut += g.num_mutations
         # Should we concatenate the result for _matmat, or add them together?
         self.concat = self.direction == Direction.DOWN
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=threads)
+        if self.mode == "concurrent":
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=threads)
         sample_count = num_samples if haploid else num_indivs
         shape = (sample_count, self.num_mutations)
         if direction == _DOWN:
@@ -681,24 +690,44 @@ class MultiSciPyXOperator(LinearOperator):
         futures = []
         if direction == Direction.UP:
             start = 0
+            result = None
+
             for op in self.operators:
                 end = start + op.shape[1]
                 assert end <= other_matrix.shape[0]
                 sub_matrix = other_matrix[start:end, :]
-                futures.append(self.executor.submit(op_method, op, sub_matrix))
-                start = end
-            result = None
-            for future in futures:
-                if result is None:
-                    result = future.result()
+                if self.mode == "concurrent":
+                    futures.append(self.executor.submit(op_method, op, sub_matrix))
+                elif self.mode == "sequential":
+                    if result is None:
+                        result = op_method(op, sub_matrix)
+                    else:
+                        result += op_method(op, sub_matrix)
                 else:
-                    result += future.result()
+                    assert False
+                start = end
+            
+            if self.mode == "concurrent":
+                for future in futures:
+                    if result is None:
+                        result = future.result()
+                    else:
+                        result += future.result()
             return result
         # For DOWN, we have "(M x N) x (N x k)", so it is much simpler (no splitting)
         else:
+            result = []
             for op in self.operators:
-                futures.append(self.executor.submit(op_method, op, other_matrix))
-            result = [f.result() for f in futures]
+                if self.mode == "concurrent":
+                    futures.append(self.executor.submit(op_method, op, other_matrix))
+                elif self.mode == "sequential":
+                    result.append(op_method(op, other_matrix))
+                else:
+                    assert False
+
+            if self.mode == "concurrent":
+                result = [f.result() for f in futures]
+
             return numpy.concatenate(result)
 
     def _matmat(self, other_matrix):
@@ -744,6 +773,9 @@ class MultiSciPyXTXOperator(LinearOperator):
     :param threads: Number of threads for performing the multiplication. Each GRG can be done in
         parallel.
     :type threads: int
+    :param mode: Execution mode for parallelism. One of "concurrent" (thread pool), or "sequential".
+        Default: "concurrent".
+    :type mode: str
     """
 
     def __init__(
@@ -754,6 +786,7 @@ class MultiSciPyXTXOperator(LinearOperator):
         miss_values: Optional[numpy.typing.NDArray] = None,
         mutation_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
+        mode: str = "concurrent",
     ):
         self.x_op = MultiSciPyXOperator(
             grgs,
@@ -763,6 +796,7 @@ class MultiSciPyXTXOperator(LinearOperator):
             miss_values=miss_values,
             mutation_filter=mutation_filter,
             threads=threads,
+            mode=mode
         )
         xtx_shape = (self.x_op.num_mutations, self.x_op.num_mutations)
         super().__init__(dtype=dtype, shape=xtx_shape)
@@ -808,6 +842,9 @@ class MultiSciPyStdXOperator(LinearOperator):
     :param threads: Number of threads for performing the multiplication. Each GRG can be done in
         parallel.
     :type threads: int
+    :param mode: Execution mode for parallelism. One of "concurrent" (thread pool), or "sequential".
+        Default: "concurrent".
+    :type mode: str
     """
 
     def __init__(
@@ -819,11 +856,14 @@ class MultiSciPyStdXOperator(LinearOperator):
         haploid: bool = False,
         mutation_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
+        mode: str = "concurrent",
     ):
         if isinstance(mutation_filter, numpy.ndarray):
             mutation_filter = mutation_filter.tolist()
         assert len(grgs) >= 1, "Must provide at least one GRG"
         assert len(grgs) == len(freqs), "Must provide allele frequencies for every GRG"
+        assert mode in ["concurrent", "sequential", "overlap"], "Invalid mode"
+        self.mode = mode
         self.direction = direction
         self.num_mutations = sum([g.num_mutations for g in grgs])
         num_samples = grgs[0].num_samples
@@ -866,7 +906,8 @@ class MultiSciPyStdXOperator(LinearOperator):
             prev_max_mut += g.num_mutations
         # Should we concatenate the result for _matmat, or add them together?
         self.concat = self.direction == Direction.DOWN
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=threads)
+        if self.mode == "concurrent":
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=threads)
         sample_count = num_samples if haploid else num_indivs
         shape = (sample_count, self.num_mutations)
         if direction == _DOWN:
@@ -879,24 +920,40 @@ class MultiSciPyStdXOperator(LinearOperator):
         futures = []
         if direction == Direction.UP:
             start = 0
+            result = None
             for op in self.operators:
                 end = start + op.shape[1]
                 assert end <= other_matrix.shape[0]
                 sub_matrix = other_matrix[start:end, :]
-                futures.append(self.executor.submit(op_method, op, sub_matrix))
-                start = end
-            result = None
-            for future in futures:
-                if result is None:
-                    result = future.result()
+                if self.mode == "concurrent":
+                    futures.append(self.executor.submit(op_method, op, sub_matrix))
+                elif self.mode == "sequential":
+                    if result is None:
+                        result = op_method(op, sub_matrix)
+                    else:
+                        result += op_method(op, sub_matrix)
                 else:
-                    result += future.result()
+                    assert False
+                start = end
+            if self.mode == "concurrent":
+                for future in futures:
+                    if result is None:
+                        result = future.result()
+                    else:
+                        result += future.result()
             return result
         # For DOWN, we have "(M x N) x (N x k)", so it is much simpler (no splitting)
         else:
+            result = []
             for op in self.operators:
-                futures.append(self.executor.submit(op_method, op, other_matrix))
-            result = [f.result() for f in futures]
+                if self.mode == "concurrent":
+                    futures.append(self.executor.submit(op_method, op, other_matrix))
+                elif self.mode == "sequential":
+                    result.append(op_method(op, other_matrix))
+                else:
+                    assert False
+            if self.mode == "concurrent":
+                result = [f.result() for f in futures]
             return numpy.concatenate(result)
 
     def _matmat(self, other_matrix):
@@ -940,6 +997,9 @@ class MultiSciPyStdXTXOperator(LinearOperator):
     :param threads: Number of threads for performing the multiplication. Each GRG can be done in
         parallel.
     :type threads: int
+    :param mode: Execution mode for parallelism. One of "concurrent" (thread pool), or "sequential".
+        Default: "concurrent".
+    :type mode: str
     """
 
     def __init__(
@@ -950,6 +1010,7 @@ class MultiSciPyStdXTXOperator(LinearOperator):
         haploid: bool = False,
         mutation_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
+        mode: str = "concurrent",
     ):
         self.std_x_op = MultiSciPyStdXOperator(
             grgs,
@@ -959,6 +1020,7 @@ class MultiSciPyStdXTXOperator(LinearOperator):
             dtype=dtype,
             mutation_filter=mutation_filter,
             threads=threads,
+            mode=mode,
         )
         xtx_shape = (self.std_x_op.num_mutations, self.std_x_op.num_mutations)
         super().__init__(dtype=dtype, shape=xtx_shape)

@@ -9,7 +9,7 @@ from grapp.linalg.ops_scipy import (
     SciPyXOperator,
     SciPyXTXOperator,
 )
-from grapp.backends import IMMUTABLE_GRG
+from grapp.backends import IMMUTABLE_GRG, HAS_MKL, HAS_CUSPARSE
 from grapp.util import allele_frequencies
 from grapp.util.filter import grg_save_samples
 import itertools
@@ -505,3 +505,258 @@ class TestLinearOperators(unittest.TestCase):
     def tearDownClass(cls):
         if CLEANUP:
             os.remove(cls.grg_filename)
+
+MULTI_INPUT_DIR = os.environ.get("GRAPP_MULTI_TEST_INPUT_DIR")
+
+
+class _MultiLinearOperatorsTestBase:
+    BACKEND_CLASS = None
+    BACKEND_SUFFIX = None
+    BACKEND_KWARGS = {}
+    GROUND_TRUTH_CLASS = IMMUTABLE_GRG
+
+    @classmethod
+    def setUpClass(cls):
+        if not MULTI_INPUT_DIR:
+            raise unittest.SkipTest("GRAPP_MULTI_TEST_INPUT_DIR not set")
+
+        grg_files = sorted(
+            f for f in os.listdir(MULTI_INPUT_DIR) if f.endswith(".grg")
+        )
+        suffix_files = sorted(
+            f for f in os.listdir(MULTI_INPUT_DIR) if f.endswith(cls.BACKEND_SUFFIX)
+        ) if cls.BACKEND_SUFFIX else []
+
+        assert len(grg_files) != 0 and len(grg_files) == len(suffix_files), (
+            f"Mismatch or zero files: {len(grg_files)} .grg files, "
+            f"{len(suffix_files)} {cls.BACKEND_SUFFIX!r} files in {MULTI_INPUT_DIR}"
+        )
+
+        if cls.BACKEND_SUFFIX != ".grg":
+            import warnings
+            warnings.warn(
+                f"BACKEND_SUFFIX ({cls.BACKEND_SUFFIX!r}) differs from '.grg'. "
+                "Ground truth and backend file lists are matched by sort order — "
+                "ensure both sets contain the same samples in the same order.",
+                UserWarning,
+            )
+
+        cls.ground_truth_files = [os.path.join(MULTI_INPUT_DIR, f) for f in grg_files]
+        cls.backend_files = [os.path.join(MULTI_INPUT_DIR, f) for f in suffix_files]
+
+        cls.ground_truth_grgs = [cls.GROUND_TRUTH_CLASS(f) for f in cls.ground_truth_files]
+        cls.backend_grgs = [cls.BACKEND_CLASS(f, **cls.BACKEND_KWARGS) for f in cls.backend_files]
+
+    def test_multi_X_operator(self):
+        """
+        MultiSciPyXOperator on the backend files must produce the same result
+        as the same operator on the ground-truth IMMUTABLE_GRG files.
+        """
+        K = 10
+        num_mutations = sum(g.num_mutations for g in self.ground_truth_grgs)
+        num_individuals = self.ground_truth_grgs[0].num_individuals
+
+        truth_op = MultiSciPyXOperator(self.ground_truth_grgs, Direction.UP, haploid=False)
+        backend_op = MultiSciPyXOperator(self.backend_grgs, Direction.UP, haploid=False, mode="sequential")
+        self.assertEqual(truth_op.shape, backend_op.shape)
+
+        # _matmat UP
+        random_input = numpy.random.standard_normal((K, num_mutations)).T
+        numpy.testing.assert_allclose(
+            backend_op._matmat(random_input),
+            truth_op._matmat(random_input),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # _matvec UP
+        numpy.testing.assert_allclose(
+            backend_op._matvec(random_input[:, 0]),
+            truth_op._matvec(random_input[:, 0]),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # _rmatmat (DOWN via rmatmat)
+        random_input_down = numpy.random.standard_normal((K, num_individuals)).T
+        numpy.testing.assert_allclose(
+            backend_op._rmatmat(random_input_down),
+            truth_op._rmatmat(random_input_down),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # Direction == DOWN
+        truth_op_down = MultiSciPyXOperator(self.ground_truth_grgs, Direction.DOWN, haploid=False)
+        backend_op_down = MultiSciPyXOperator(self.backend_grgs, Direction.DOWN, haploid=False, mode="sequential")
+        self.assertEqual(truth_op_down.shape, backend_op_down.shape)
+
+        numpy.testing.assert_allclose(
+            backend_op_down._matmat(random_input_down),
+            truth_op_down._matmat(random_input_down),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+        numpy.testing.assert_allclose(
+            backend_op_down._matvec(random_input_down[:, 0]),
+            truth_op_down._matvec(random_input_down[:, 0]),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+    def test_multi_XTX_operator(self):
+        """
+        MultiSciPyXTXOperator on the backend files must produce the same result
+        as the same operator on the ground-truth IMMUTABLE_GRG files.
+        """
+        K = 10
+        num_mutations = sum(g.num_mutations for g in self.ground_truth_grgs)
+
+        truth_op = MultiSciPyXTXOperator(self.ground_truth_grgs, haploid=False)
+        backend_op = MultiSciPyXTXOperator(self.backend_grgs, haploid=False, mode="sequential")
+        self.assertEqual(truth_op.shape, backend_op.shape)
+
+        random_input = numpy.random.standard_normal((K, num_mutations)).T
+
+        # _matmat
+        numpy.testing.assert_allclose(
+            backend_op._matmat(random_input),
+            truth_op._matmat(random_input),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # _matvec
+        numpy.testing.assert_allclose(
+            backend_op._matvec(random_input[:, 0]),
+            truth_op._matvec(random_input[:, 0]),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # _rmatmat (XTX is symmetric, but still exercise the path)
+        numpy.testing.assert_allclose(
+            backend_op._rmatmat(random_input),
+            truth_op._rmatmat(random_input),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+    def test_multi_std_X_operator(self):
+        """
+        MultiSciPyStdXOperator on the backend files must produce the same result
+        as the same operator on the ground-truth IMMUTABLE_GRG files.
+
+        We use truth_freqs for both operators so that any frequency-computation
+        differences between backends don't confound the operator comparison.
+        """
+        K = 10
+        num_mutations = sum(g.num_mutations for g in self.ground_truth_grgs)
+        num_individuals = self.ground_truth_grgs[0].num_individuals
+
+        # Use truth_freqs for both so we're testing the operator, not frequency computation.
+        truth_freqs = [allele_frequencies(g) for g in self.ground_truth_grgs]
+
+        truth_op = MultiSciPyStdXOperator(self.ground_truth_grgs, Direction.UP, truth_freqs, haploid=False)
+        backend_op = MultiSciPyStdXOperator(self.backend_grgs, Direction.UP, truth_freqs, haploid=False, mode="sequential")
+        self.assertEqual(truth_op.shape, backend_op.shape)
+
+        # _matmat UP
+        random_input = numpy.random.standard_normal((K, num_mutations)).T
+        numpy.testing.assert_allclose(
+            backend_op._matmat(random_input),
+            truth_op._matmat(random_input),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # _matvec UP
+        numpy.testing.assert_allclose(
+            backend_op._matvec(random_input[:, 0]),
+            truth_op._matvec(random_input[:, 0]),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # _rmatmat (DOWN via rmatmat)
+        random_input_down = numpy.random.standard_normal((K, num_individuals)).T
+        numpy.testing.assert_allclose(
+            backend_op._rmatmat(random_input_down),
+            truth_op._rmatmat(random_input_down),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+        # Direction == DOWN
+        truth_op_down = MultiSciPyStdXOperator(self.ground_truth_grgs, Direction.DOWN, truth_freqs, haploid=False)
+        backend_op_down = MultiSciPyStdXOperator(self.backend_grgs, Direction.DOWN, truth_freqs, haploid=False, mode="sequential")
+        self.assertEqual(truth_op_down.shape, backend_op_down.shape)
+
+        numpy.testing.assert_allclose(
+            backend_op_down._matmat(random_input_down),
+            truth_op_down._matmat(random_input_down),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+        numpy.testing.assert_allclose(
+            backend_op_down._matvec(random_input_down[:, 0]),
+            truth_op_down._matvec(random_input_down[:, 0]),
+            atol=ABSOLUTE_TOLERANCE,
+        )
+
+    def test_multi_std_XTX_operator(self):
+        """
+        MultiSciPyStdXTXOperator on the backend files must produce the same result
+        as the same operator on the ground-truth IMMUTABLE_GRG files.
+
+        We use truth_freqs for both operators so that any frequency-computation
+        differences between backends don't confound the operator comparison.
+
+        Note: the tolerance here is looser than the single-pass X tests. MKL and
+        cuSparse use internal parallelism in their SpMV kernels, which can reorder
+        floating-point additions non-deterministically. StdXTX chains two SpMV calls
+        (X then X^T), compounding the error. The standardization (dividing by σ and
+        subtracting the mean) further amplifies small differences, pushing errors to
+        ~1e-8 — above the default 1e-10 tolerance used for single-pass operators.
+        Setting MKL threads to 1 will give deterministic results, while still differing
+        from the pygrgl implementation.
+        """
+        # XTX_TOLERANCE accounts for error amplification from two chained SpMV calls.
+        XTX_TOLERANCE = 1e-6
+
+        K = 10
+        num_mutations = sum(g.num_mutations for g in self.ground_truth_grgs)
+
+        # Use truth_freqs for both so we're testing the operator, not frequency computation.
+        truth_freqs = [allele_frequencies(g) for g in self.ground_truth_grgs]
+
+        truth_op = MultiSciPyStdXTXOperator(self.ground_truth_grgs, truth_freqs, haploid=False)
+        backend_op = MultiSciPyStdXTXOperator(self.backend_grgs, truth_freqs, haploid=False, mode="sequential")
+        self.assertEqual(truth_op.shape, backend_op.shape)
+
+        random_input = numpy.random.standard_normal((K, num_mutations)).T
+
+        # _matmat
+        numpy.testing.assert_allclose(
+            backend_op._matmat(random_input),
+            truth_op._matmat(random_input),
+            atol=XTX_TOLERANCE,
+        )
+
+        # _matvec
+        numpy.testing.assert_allclose(
+            backend_op._matvec(random_input[:, 0]),
+            truth_op._matvec(random_input[:, 0]),
+            atol=XTX_TOLERANCE,
+        )
+
+        # _rmatmat (StdXTX is symmetric, but still exercise the path)
+        numpy.testing.assert_allclose(
+            backend_op._rmatmat(random_input),
+            truth_op._rmatmat(random_input),
+            atol=XTX_TOLERANCE,
+        )
+
+
+@unittest.skipUnless(MULTI_INPUT_DIR and HAS_MKL, "GRAPP_MULTI_TEST_INPUT_DIR not set or MKL not available")
+class TestMultiOps_SPMV_MKL(_MultiLinearOperatorsTestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_MKL
+    BACKEND_CLASS = SPMV_GRG_MKL
+    BACKEND_SUFFIX = ".grg"
+    BACKEND_KWARGS = {"nthreads": 32}
+
+
+@unittest.skipUnless(MULTI_INPUT_DIR and HAS_CUSPARSE, "GRAPP_MULTI_TEST_INPUT_DIR not set or cuSPARSE not available")
+class TestMultiOps_SPMV_cuSparse(_MultiLinearOperatorsTestBase, unittest.TestCase):
+    from grapp.backends.spmv import SPMV_GRG_cuSparse
+    BACKEND_CLASS = SPMV_GRG_cuSparse
+    BACKEND_SUFFIX = ".grg"
+    BACKEND_KWARGS = {}
