@@ -169,7 +169,7 @@ class SPMV_GRG(GRGBase):
         name = os.path.splitext(os.path.basename(src_path))[0]
         resolved = os.path.realpath(os.path.expanduser(src_path))
         saved_path = os.path.join(dst_path, "_abs", resolved.lstrip("/").replace(".grg", ".grg_spmv"))
-        final_path = os.path.join(dst_path, name + ".spmv_grg")
+        final_path = os.path.join(dst_path, name + ".grg_spmv")
         os.rename(saved_path, final_path)
 
         print(f"Constructed file saved at {final_path}")
