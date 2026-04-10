@@ -129,7 +129,7 @@ class GRGThreadSched(GRGScheduler):
     def submit(self, grg: GRGCalcInterface, operation, *args, **kwargs) -> GRGWaitable:
         # We don't need the grg object, because the operation encompasses it. Other methods of
         # scheduling may need to do custom swapping of the grg in/out of memory.
-        assert isinstance(grg, GRGCalculator)
+        assert isinstance(grg, GRGCalcInterface)
         return GRGThreadOp(self.executor.submit(operation, *args, **kwargs))
 
 
@@ -207,8 +207,9 @@ class GRGSpMVCalculator(GRGCalcInterface):
     Implementaion of the GRG calculator interface for the SPMV-based GRG.
     """
 
-    def __init__(self, grg_spmv):
+    def __init__(self, grg_spmv, workers: int = 1):
         self._op = grg_spmv
+        self._worksers = workers
 
     @property
     def num_samples(self) -> int:
@@ -271,10 +272,13 @@ class GRGSpMVCalculator(GRGCalcInterface):
         )
 
     def make_scheduler(self, grgs: List["GRGCalcInterface"], workers: int = 1):
+        if self._workers > 1:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=self._workers)
+            return GRGThreadSched(executor)
         return GRGSeqSched()
 
 
-def load_grg_calculator(filename: str) -> GRGCalcInterface:
+def load_grg_calculator(filename: str, workers: int = 1) -> GRGCalcInterface:
     """
     Load a file as one of the supported GRG calculator file types.
     """
@@ -291,7 +295,7 @@ def load_grg_calculator(filename: str) -> GRGCalcInterface:
         )
     for ext, loader in extension_to_loader.items():
         if filename.endswith(ext):
-            return loader(filename)
+            return loader(filename, workers=workers)
     raise UserInputError(
         f"Only the following file extensions are supported: {', '.join(extension_to_loader.keys())}"
     )
