@@ -209,7 +209,7 @@ class GRGSpMVCalculator(GRGCalcInterface):
 
     def __init__(self, grg_spmv, workers: int = 1):
         self._op = grg_spmv
-        self._worksers = workers
+        self._workers = workers
 
     @property
     def num_samples(self) -> int:
