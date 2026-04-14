@@ -329,7 +329,7 @@ def load_grg_calculator(filename: str, workers: int = 1) -> GRGCalcInterface:
         )
     for ext, loader in extension_to_loader.items():
         if filename.endswith(ext):
-            return loader(filename, workers=workers)
+            return loader(filename)
     raise UserInputError(
         f"Only the following file extensions are supported: {', '.join(extension_to_loader.keys())}"
     )
