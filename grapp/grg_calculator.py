@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import pygrgl
 import numpy
 import concurrent.futures
+import threading
 from typing import Optional, Union, Dict, Callable, List, Any
 from grapp.util.exceptions import UserInputError
 
@@ -133,6 +134,36 @@ class GRGThreadSched(GRGScheduler):
         return GRGThreadOp(self.executor.submit(operation, *args, **kwargs))
 
 
+class GRGHybridSched(GRGScheduler):
+    """
+    A scheduler that runs operations concurrently, but serializes operations whose
+    underlying calculator returns the same non-zero lock ID. If the lock ID is 0,
+    the operation is submitted to the thread pool without any locking.
+    """
+
+    def __init__(self, executor: concurrent.futures.Executor, lock_fn: Callable[["GRGCalcInterface"], int]):
+        self.executor = executor
+        self.lock_fn = lock_fn
+        self._locks: Dict[int, threading.Lock] = {}
+        self._locks_mutex = threading.Lock()
+
+    def _get_lock(self, lock_id: int) -> threading.Lock:
+        with self._locks_mutex:
+            if lock_id not in self._locks:
+                self._locks[lock_id] = threading.Lock()
+            return self._locks[lock_id]
+
+    def submit(self, grg: GRGCalcInterface, operation, *args, **kwargs) -> GRGWaitable:
+        lock_id = self.lock_fn(grg)
+        if lock_id == 0:
+            return GRGThreadOp(self.executor.submit(operation, *args, **kwargs))
+        lock = self._get_lock(lock_id)
+        def locked_op():
+            with lock:
+                return operation(*args, **kwargs)
+        return GRGThreadOp(self.executor.submit(locked_op))
+
+
 class GRGCalculator(GRGCalcInterface):
     """
     Implementaion of the GRG calculator interface for the regular GRG. This is what most
@@ -207,9 +238,8 @@ class GRGSpMVCalculator(GRGCalcInterface):
     Implementaion of the GRG calculator interface for the SPMV-based GRG.
     """
 
-    def __init__(self, grg_spmv, workers: int = 1):
+    def __init__(self, grg_spmv):
         self._op = grg_spmv
-        self._workers = workers
 
     @property
     def num_samples(self) -> int:
@@ -246,6 +276,10 @@ class GRGSpMVCalculator(GRGCalcInterface):
     def get_mutation_by_id(self, id: int) -> pygrgl.Mutation:
         return self._op.get_mutation_by_id(id)
 
+    @property
+    def lock(self) -> int:
+        return getattr(self._op, "lock", 0)
+
     def _convert_dir(self, d: pygrgl.TraversalDirection):
         if d == pygrgl.TraversalDirection.DOWN:
             return "down"
@@ -272,9 +306,9 @@ class GRGSpMVCalculator(GRGCalcInterface):
         )
 
     def make_scheduler(self, grgs: List["GRGCalcInterface"], workers: int = 1):
-        if self._workers > 1:
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=self._workers)
-            return GRGThreadSched(executor)
+        if workers > 1:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+            return GRGHybridSched(executor, lambda grg: grg.lock if hasattr(grg, "lock") else 0)
         return GRGSeqSched()
 
 
