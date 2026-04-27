@@ -1,10 +1,13 @@
 from abc import ABC, abstractmethod
+import logging
 import pygrgl
 import numpy
 import concurrent.futures
 import threading
 from typing import Optional, Union, Dict, Callable, List, Any
 from grapp.util.exceptions import UserInputError
+
+logger = logging.getLogger(__name__)
 
 try:
     import pygrgl_spmv
@@ -141,27 +144,23 @@ class GRGHybridSched(GRGScheduler):
     the operation is submitted to the thread pool without any locking.
     """
 
-    def __init__(self, executor: concurrent.futures.Executor, lock_fn: Callable[["GRGCalcInterface"], int]):
+    def __init__(self, executor: concurrent.futures.Executor, device_fn: Callable[["GRGCalcInterface"], int]):
         self.executor = executor
-        self.lock_fn = lock_fn
-        self._locks: Dict[int, threading.Lock] = {}
-        self._locks_mutex = threading.Lock()
+        self.device_fn = device_fn
+        self._device_executors: Dict[int, concurrent.futures.ThreadPoolExecutor] = {}
+        self._mutex = threading.Lock()
 
-    def _get_lock(self, lock_id: int) -> threading.Lock:
-        with self._locks_mutex:
-            if lock_id not in self._locks:
-                self._locks[lock_id] = threading.Lock()
-            return self._locks[lock_id]
+    def _get_device_executor(self, device_id: int) -> concurrent.futures.ThreadPoolExecutor:
+        with self._mutex:
+            if device_id not in self._device_executors:
+                self._device_executors[device_id] = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            return self._device_executors[device_id]
 
     def submit(self, grg: GRGCalcInterface, operation, *args, **kwargs) -> GRGWaitable:
-        lock_id = self.lock_fn(grg)
-        if lock_id == 0:
+        device_id = self.device_fn(grg)
+        if device_id == None:
             return GRGThreadOp(self.executor.submit(operation, *args, **kwargs))
-        lock = self._get_lock(lock_id)
-        def locked_op():
-            with lock:
-                return operation(*args, **kwargs)
-        return GRGThreadOp(self.executor.submit(locked_op))
+        return GRGThreadOp(self._get_device_executor(device_id).submit(operation, *args, **kwargs))
 
 
 class GRGCalculator(GRGCalcInterface):
@@ -277,8 +276,8 @@ class GRGSpMVCalculator(GRGCalcInterface):
         return self._op.get_mutation_by_id(id)
 
     @property
-    def lock(self) -> int:
-        return getattr(self._op, "lock", 0)
+    def device(self) -> int | None:
+        return getattr(self._op, "device", None)
 
     def _convert_dir(self, d: pygrgl.TraversalDirection):
         if d == pygrgl.TraversalDirection.DOWN:
@@ -296,7 +295,13 @@ class GRGSpMVCalculator(GRGCalcInterface):
         init: Optional[Union[str, numpy.typing.NDArray]] = None,
         miss: Optional[numpy.typing.NDArray] = None,
     ) -> numpy.typing.NDArray:
-        return self._op.matmul(
+        init_repr = init.shape if isinstance(init, numpy.ndarray) else init
+        miss_repr = miss.shape if isinstance(miss, numpy.ndarray) else miss
+        logger.info(
+            "SpMV matmul begin: input=%s direction=%s emit_all_nodes=%s by_individual=%s init=%s miss=%s",
+            input.shape, direction, emit_all_nodes, by_individual, init_repr, miss_repr,
+        )
+        result = self._op.matmul(
             input,
             self._convert_dir(direction),
             emit_all_nodes=emit_all_nodes,
@@ -304,11 +309,13 @@ class GRGSpMVCalculator(GRGCalcInterface):
             init=init,
             miss=miss,
         )
+        logger.info("SpMV matmul done: result=%s", result.shape)
+        return result
 
     def make_scheduler(self, grgs: List["GRGCalcInterface"], workers: int = 1):
         if workers > 1:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-            return GRGHybridSched(executor, lambda grg: grg.lock if hasattr(grg, "lock") else 0)
+            return GRGHybridSched(executor, lambda grg: grg.device if hasattr(grg, "device") else None)
         return GRGSeqSched()
 
 
