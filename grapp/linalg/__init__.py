@@ -12,10 +12,13 @@ import concurrent.futures
 from enum import Enum
 from numpy.typing import NDArray
 from scipy.sparse.linalg import eigsh
+from cupyx.scipy.sparse.linalg import eigsh as eigsh_cupy
 from typing import Tuple, List, Dict, Any, Union, Optional
 
 from grapp.util import allele_frequencies as _allele_frequencies
+from grapp.util import allele_frequencies_cupy as _allele_frequencies_cupy
 from grapp.grg_calculator import GRGCalcInterface as _GRGCalcInterface
+from grapp.grg_calculator import _wrap_grg
 
 # Everything below is imported so that users can import them via grapp.linalg
 from grapp.linalg.ops_scipy import (  # noqa: F401
@@ -28,6 +31,22 @@ from grapp.linalg.ops_scipy import (  # noqa: F401
     MultiSciPyStdXOperator,
     MultiSciPyStdXTXOperator,
     MultiSciPyStdXXTOperator,
+    get_call_counts as get_scipy_call_counts,  # noqa: F401
+    clear_call_counts as clear_scipy_call_counts,  # noqa: F401
+)
+
+from grapp.linalg.ops_cupy import (  # noqa: F401
+    CuPyXOperator,
+    CuPyXTXOperator,
+    CuPyXXTOperator,
+    CuPyStdXOperator,
+    CuPyStdXTXOperator,
+    CuPyStdXXTOperator,
+    MultiCuPyStdXOperator,
+    MultiCuPyStdXTXOperator,
+    MultiCuPyStdXXTOperator,
+    get_call_counts as get_cupy_call_counts,  # noqa: F401
+    clear_call_counts as clear_cupy_call_counts,  # noqa: F401
 )
 from grapp.linalg.proPCA import get_pcs_propca
 
@@ -159,6 +178,9 @@ def get_eig_pcs(
     threads: int = 1,
     verbose: bool = True,
     do_xtx: bool = False,
+    use_cupy: bool = False,
+    init_vector: Optional[numpy.typing.NDArray] = None,
+    tol: float = 0,
 ) -> Tuple[NDArray, NDArray, Optional[NDArray]]:
     """
     Get the principal components for each sample corresponding to the first :math:`k` eigenvectors from a GRG,
@@ -177,23 +199,36 @@ def get_eig_pcs(
     :type verboose: bool
     :param do_xtx: Use eigsh(X^TX) instead of the default eigsh(XX^T). Default: False.
     :type do_xtx: bool
+    :param init_vector: Starting vector (v0) for the eigsh Lanczos iteration. Passing a warm-start
+        vector can speed up convergence. Default: None (eigsh chooses randomly).
+    :type init_vector: Optional[numpy.typing.NDArray]
+    :param tol: Convergence tolerance passed to eigsh. 0 means machine precision. Default: 0.
+    :type tol: float
     :return: A pair (PC_scores, eigen_values) where each is a numpy array.
     :rtype: Tuple[numpy.ndarray, numpy.ndarray, Optional[numpy.ndarray]]
     """
     freqs: Union[List[numpy.typing.NDArray], numpy.typing.NDArray]
     if isinstance(grgs, list):
-        executor = concurrent.futures.ThreadPoolExecutor(threads)
-        futures = [executor.submit(_allele_frequencies, grg) for grg in grgs]
+        freq_fn = _allele_frequencies_cupy if use_cupy else _allele_frequencies
+        scheduler = _wrap_grg(grgs[0]).make_scheduler(grgs, threads)
+        futures = [scheduler.submit(grg, freq_fn, grg) for grg in grgs]
         freqs = [f.result() for f in futures]
         if do_xtx:
+            assert not use_cupy, "cupy is not currently supported for xtx"
             op = MultiSciPyStdXTXOperator(
                 grgs, freqs, haploid=False, threads=threads, **op_kwargs
             )
         else:
-            op = MultiSciPyStdXXTOperator(
-                grgs, freqs, haploid=False, threads=threads, **op_kwargs
-            )
+            if use_cupy:
+                op = MultiCuPyStdXXTOperator(
+                    grgs, freqs, haploid=False, threads=threads, **op_kwargs
+                )
+            else:
+                op = MultiSciPyStdXXTOperator(
+                    grgs, freqs, haploid=False, threads=threads, **op_kwargs
+                )
     else:
+        assert not use_cupy, "cupy is not currently supported for single GRG input"
         freqs = _allele_frequencies(grgs, adjust_missing=True)
         if do_xtx:
             op = SciPyStdXTXOperator(grgs, freqs, haploid=False, **op_kwargs)
@@ -203,11 +238,24 @@ def get_eig_pcs(
         what = "variants" if do_xtx else "individuals"
         print(f"Running eigen decomposition on {op.shape[0]} {what}")
 
-    eigen_values, eigen_vectors = eigsh(op, k=k, which="LM")
+    if not use_cupy:
+        eigen_values, eigen_vectors = eigsh(op, k=k, which="LM", v0=init_vector, tol=tol)
+    else:
+        import cupy
+        eigen_values, eigen_vectors = eigsh_cupy(op, k=k, which="LM", v0=init_vector, tol=tol)
+        # copy back to cpu
+        eigen_values = cupy.asnumpy(eigen_values)
+        eigen_vectors = cupy.asnumpy(eigen_vectors)
+
     sort_by_eigvalues(eigen_values, eigen_vectors)
     assert eigen_vectors.real.dtype == numpy.float64
+    eigvec_norms = numpy.linalg.norm(eigen_vectors.real, axis=0)
+    scipy_effective_tol = numpy.finfo(numpy.float64).eps * float(eigen_values[0])
+    print(f"eigvec_col_norms={numpy.array2string(eigvec_norms, precision=6)}  scipy_effective_tol={scipy_effective_tol:.6e}", file=sys.stderr)
     if not do_xtx:
         return eigen_vectors, eigen_values, None
+
+    assert not use_cupy, "cupy is not currently supported for xtx"
 
     # If we did X^TX then we need to get the PC scores by performing one more product
     if isinstance(grgs, list):
@@ -243,6 +291,9 @@ def PCs(
     use_pro_pca: bool = False,
     sample_window: int = 1,
     threads: int = 1,
+    use_cupy: bool = False,
+    init_vector: Optional[numpy.typing.NDArray] = None,
+    tol: float = 0,
 ):
     """
     Get the principal components for each sample corresponding to the first :math:`k` eigenvectors from a GRG.
@@ -263,6 +314,12 @@ def PCs(
     :param threads: Number of threads to use. Will never use more than the number of input GRGs.
         Default: 1.
     :type threads: int
+    :param init_vector: Starting vector (v0) for the eigsh Lanczos iteration. Ignored when
+        use_pro_pca is True. Default: None (eigsh chooses randomly).
+    :type init_vector: Optional[numpy.typing.NDArray]
+    :param tol: Convergence tolerance passed to eigsh. 0 means machine precision. Ignored when
+        use_pro_pca is True. Default: 0.
+    :type tol: float
     :return: A pandas.DataFrame with a row per individual and a column per principal component. Or, if include_eig
         then a triple (dataframe, eigen values, eigen vectors), where eigen vectors are None unless use_pro_pca
         was True.
@@ -289,6 +346,7 @@ def PCs(
         k = min(k, total_muts)
 
     if use_pro_pca:
+        assert not use_cupy, "cupy is not currently supported for proPCA"
         PC_scores, eigen_values, eigen_vectors = get_pcs_propca(
             grg_list, k, threads=threads, op_kwargs={"mutation_filter": mutation_filter}
         )
@@ -299,6 +357,9 @@ def PCs(
             threads=threads,
             op_kwargs={"mutation_filter": mutation_filter},
             do_xtx=include_eig,
+            use_cupy=use_cupy,
+            init_vector=init_vector,
+            tol=tol,
         )
 
     colnames = [f"PC{i+1}" for i in range(PC_scores.shape[1])]

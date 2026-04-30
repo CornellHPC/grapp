@@ -118,7 +118,7 @@ def allele_counts(
 def allele_frequencies(
     grg: Union[pygrgl.GRG, _GRGCalcInterface],
     adjust_missing: bool = False,
-    sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
+    sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None
 ) -> numpy.typing.NDArray:
     """
     Get the allele frequencies for the mutations in the given GRG.
@@ -148,12 +148,96 @@ def allele_frequencies(
         num_samples = grg.num_samples if sample_filter is None else len(sample_filter)
         denominator = num_samples - miss_counts
         assert numpy.all(denominator >= 0)
+        print("denominator", denominator, "shape", acounts.shape )
         return numpy.divide(
             acounts,
             denominator,
             out=numpy.zeros(acounts.shape, dtype=numpy.float64),
             where=(denominator != 0),
         )
+
+def allele_counts_cupy(
+    grg: Union[pygrgl.GRG, _GRGCalcInterface],
+    return_missing: bool = False,
+    sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
+) -> Union["cupy.ndarray", Tuple["cupy.ndarray", "cupy.ndarray"]]:
+    """
+    CuPy variant of allele_counts. Input and output arrays are cupy arrays on
+    the device owned by the GRG. The GRG must support GPU-resident matmul
+    (e.g. NativeCapturedBoundGRG).
+    """
+    import cupy
+    grg = _wrap_grg(grg)
+    if isinstance(sample_filter, numpy.ndarray):
+        sample_filter = sample_filter.tolist()
+    if sample_filter is not None:
+        assert len(set(sample_filter)) == len(
+            sample_filter
+        ), "Duplicate IDs in sample_filter"
+        assert len(sample_filter) <= grg.num_samples
+    kwargs = {}
+    with cupy.cuda.Device(grg.device):
+        if return_missing:
+            miss_counts = cupy.zeros((1, grg.num_mutations), dtype=cupy.int32)
+            kwargs["miss"] = miss_counts
+        else:
+            miss_counts = None
+        if sample_filter is not None:
+            input_mat = cupy.zeros((1, grg.num_samples), dtype=cupy.int32)
+            input_mat[:, sample_filter] = 1
+        else:
+            input_mat = cupy.ones((1, grg.num_samples), dtype=cupy.int32)
+        acounts = grg.matmul(input_mat, pygrgl.TraversalDirection.UP, **kwargs)[0]  # type: ignore
+        print(acounts.shape)
+    if miss_counts is not None:
+        miss_counts = miss_counts[0]
+        assert miss_counts is not None
+        return acounts, miss_counts
+    return acounts
+
+
+def allele_frequencies_cupy(
+    grg: Union[pygrgl.GRG, _GRGCalcInterface],
+    adjust_missing: bool = False,
+    sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None
+) -> numpy.typing.NDArray:
+    """
+    Get the allele frequencies for the mutations in the given GRG.
+
+    :param grg: The GRG.
+    :type grg: pygrgl.GRG
+    :param adjust_missing: Optional. Set to true to adjust each allele frequncies to be
+        :math:`\\frac{count_i}{total - missing_i}` instead of :math:`\\frac{count_i}{total}`.
+    :type adjust_missing: bool
+    :param sample_filter: Only consider the samples listed in the filter. Default: no filter.
+    :type sample_filter: Optional[Union[List[int], numpy.typing.NDArray]]
+    :return: A vector of length grg.num_mutations, containing allele frequencies
+        indexed by MutationID.
+    :rtype: numpy.ndarray
+    """
+    grg = _wrap_grg(grg)
+    import cupy
+    num_samples = grg.num_samples if sample_filter is None else len(sample_filter)
+    if adjust_missing:
+        print("Adjusting for missing")
+        acounts, miss_counts = allele_counts_cupy(
+            grg, return_missing=True, sample_filter=sample_filter
+        )
+        denominator = num_samples - miss_counts  # cupy array
+        assert cupy.all(denominator >= 0)
+        safe = cupy.where(denominator > 0, denominator, 1).astype(cupy.float64)
+        result = acounts.astype(cupy.float64) / safe
+        result[denominator == 0] = 0.0
+        with cupy.cuda.Device(grg.device):
+            return result.copy()
+    else:
+        acounts = allele_counts_cupy(
+            grg, return_missing=False, sample_filter=sample_filter
+        )
+        print("Not adjusting for missing")
+        print("Num samples", num_samples)
+        with cupy.cuda.Device(grg.device):
+            return (acounts.astype(cupy.float64) / num_samples).copy()
 
 
 def variance(
