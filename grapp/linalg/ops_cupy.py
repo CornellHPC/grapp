@@ -1170,7 +1170,7 @@ class MultiCuPyStdXXTOperator(LinearOperator):
                 )
             prev_max_mut += g.num_mutations
         self._output_device = self.operators[0]._device
-        self.scheduler = _wrap_grg(grgs[0]).make_scheduler(grgs, threads)
+        self.scheduler = _wrap_grg(grgs[0]).make_scheduler(grgs, threads, gated=True)
         n = self.operators[0].shape[0]
         super().__init__(dtype=dtype, shape=(n, n))
 
@@ -1183,12 +1183,14 @@ class MultiCuPyStdXXTOperator(LinearOperator):
             for _ in self.operators:
                 with cuda.Device(self._output_device):
                     parts.append(xp.empty((n, k), dtype=self.dtype))
+            self.scheduler.reset()
             for op, part in zip(self.operators, parts):
                 futures.append(
                     self.scheduler.submit(
                         op.grg, CuPyStdXXTOperator._matmat, op, other_matrix, part
                     )
                 )
+            self.scheduler.start()
             for f in futures:
                 f.result()
             with cuda.Device(self._output_device):

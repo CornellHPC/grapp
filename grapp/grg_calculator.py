@@ -144,11 +144,19 @@ class GRGHybridSched(GRGScheduler):
     the operation is submitted to the thread pool without any locking.
     """
 
-    def __init__(self, executor: concurrent.futures.Executor, device_fn: Callable[["GRGCalcInterface"], int]):
+    def __init__(
+        self,
+        executor: concurrent.futures.Executor,
+        device_fn: Callable[["GRGCalcInterface"], int],
+        gated: bool = False,
+    ):
         self.executor = executor
         self.device_fn = device_fn
         self._device_executors: Dict[int, concurrent.futures.ThreadPoolExecutor] = {}
         self._mutex = threading.Lock()
+        self._start_gate = threading.Event()
+        if not gated:
+            self._start_gate.set()
 
     def _get_device_executor(self, device_id: int) -> concurrent.futures.ThreadPoolExecutor:
         with self._mutex:
@@ -156,11 +164,21 @@ class GRGHybridSched(GRGScheduler):
                 self._device_executors[device_id] = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             return self._device_executors[device_id]
 
+    def _gated_operation(self, operation, *args, **kwargs):
+        self._start_gate.wait()
+        return operation(*args, **kwargs)
+
+    def start(self) -> None:
+        self._start_gate.set()
+
+    def reset(self) -> None:
+        self._start_gate.clear()
+
     def submit(self, grg: GRGCalcInterface, operation, *args, **kwargs) -> GRGWaitable:
         device_id = self.device_fn(grg)
         if device_id == None:
-            return GRGThreadOp(self.executor.submit(operation, *args, **kwargs))
-        return GRGThreadOp(self._get_device_executor(device_id).submit(operation, *args, **kwargs))
+            return GRGThreadOp(self.executor.submit(self._gated_operation, operation, *args, **kwargs))
+        return GRGThreadOp(self._get_device_executor(device_id).submit(self._gated_operation, operation, *args, **kwargs))
 
 
 class GRGCalculator(GRGCalcInterface):
@@ -297,7 +315,7 @@ class GRGSpMVCalculator(GRGCalcInterface):
     ) -> numpy.typing.NDArray:
         init_repr = init.shape if isinstance(init, numpy.ndarray) else init
         miss_repr = miss.shape if isinstance(miss, numpy.ndarray) else miss
-        logger.info(
+        logger.debug(
             "SpMV matmul begin: input=%s direction=%s emit_all_nodes=%s by_individual=%s init=%s miss=%s",
             input.shape, direction, emit_all_nodes, by_individual, init_repr, miss_repr,
         )
@@ -312,10 +330,10 @@ class GRGSpMVCalculator(GRGCalcInterface):
         logger.info("SpMV matmul done: result=%s", result.shape)
         return result
 
-    def make_scheduler(self, grgs: List["GRGCalcInterface"], workers: int = 1):
+    def make_scheduler(self, grgs: List["GRGCalcInterface"], workers: int = 1, gated: bool = False):
         if workers > 1:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-            return GRGHybridSched(executor, lambda grg: grg.device if hasattr(grg, "device") else None)
+            return GRGHybridSched(executor, lambda grg: grg.device if hasattr(grg, "device") else None, gated=gated)
         return GRGSeqSched()
 
 
