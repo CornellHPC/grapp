@@ -5,8 +5,6 @@ import numpy
 import concurrent.futures
 import threading
 from typing import Optional, Union, Dict, Callable, List, Any
-from grapp.util.exceptions import UserInputError
-
 logger = logging.getLogger(__name__)
 
 try:
@@ -296,6 +294,10 @@ class GRGSpMVCalculator(GRGCalcInterface):
     @property
     def device(self) -> int | None:
         return getattr(self._op, "device", None)
+    
+    @property
+    def use_cupy(self) -> bool:
+        return getattr(self._op, "use_cupy", False)
 
     def _convert_dir(self, d: pygrgl.TraversalDirection):
         if d == pygrgl.TraversalDirection.DOWN:
@@ -341,6 +343,7 @@ def load_grg_calculator(filename: str, workers: int = 1) -> GRGCalcInterface:
     """
     Load a file as one of the supported GRG calculator file types.
     """
+    from grapp.util.exceptions import UserInputError
     extension_to_loader: Dict[str, Callable[[str], GRGCalcInterface]] = {
         ".grg": (
             lambda filename: GRGCalculator(

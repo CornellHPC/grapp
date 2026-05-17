@@ -21,9 +21,38 @@ except ImportError:
 _DOWN = TraversalDirection.DOWN
 _UP = TraversalDirection.UP
 
+_call_counts: dict = {}
+
+
+def get_call_counts() -> dict:
+    return dict(_call_counts)
+
+
+def clear_call_counts() -> None:
+    _call_counts.clear()
+
 
 def _flip_dir(direction: TraversalDirection) -> TraversalDirection:
     return _UP if direction == _DOWN else _DOWN
+
+
+def _per_grg_mut_filt(mutation_filter, prev_max_mut, g):
+    """
+    Remap a global mutation_filter (indices into the concatenated multi-GRG space)
+    into a per-GRG filter (indices into this GRG's local mutation space).
+
+    :return: (grg_mut_filt, skip) — ``grg_mut_filt`` is None if no global filter,
+        else a list of local indices for this GRG. ``skip`` is True when the
+        global filter is set but selects no mutations from this GRG.
+    """
+    if mutation_filter is None:
+        return None, False
+    grg_mut_filt = [
+        m - prev_max_mut
+        for m in mutation_filter
+        if prev_max_mut <= m < prev_max_mut + g.num_mutations
+    ]
+    return grg_mut_filt, (len(grg_mut_filt) == 0)
 
 
 def _transpose_shape(shape: Tuple[int, int]) -> Tuple[int, int]:
@@ -458,35 +487,38 @@ class SciPyStdXOperator(_SciPyStandardizedOperator):
         mult_dir = _flip_dir(direction)
         with numpy.errstate(divide="raise"):
             if direction == _UP:
-                vS = (
-                    self.filter.prep_input(other_matrix.T, mult_dir)
-                    * self.inverse_sigma
-                )
+                # Scale in model-variant space (inverse_sigma length = m_model)
+                # before prep_input expands to full GRG space (num_mutations).
+                scaled = other_matrix.T * self.inverse_sigma        # (k, m_model)
+                consts = numpy.array(
+                    [numpy.sum(self.mult_const * self.freqs * scaled, axis=1)]
+                ).T                                                   # (k, 1)
+                vS = self.filter.prep_input(scaled, mult_dir)        # (k, num_mutations)
                 XvS = self.grg.matmul(
                     vS,
                     mult_dir,
                     by_individual=not self.haploid,
                 )
-                consts = numpy.array(
-                    [numpy.sum(self.mult_const * self.freqs * vS, axis=1)]
-                ).T
                 return self.filter.adjust_output(XvS - consts, mult_dir).T
             else:
                 assert direction == _DOWN
                 m = self.filter.prep_input(other_matrix.T, mult_dir)
-                SXv = (
+                # Extract model columns before multiplying by inverse_sigma
+                # to keep shapes consistent when m_model < num_mutations.
+                XTv = self.filter.adjust_output(
                     self.grg.matmul(
                         m,
                         mult_dir,
                         by_individual=not self.haploid,
-                    )
-                    * self.inverse_sigma
-                )
+                    ),
+                    mult_dir,
+                )                                                     # (k, m_model)
+                SXv = XTv * self.inverse_sigma                       # (k, m_model)
                 col_const = numpy.sum(m.T, axis=0, keepdims=True).T
                 sub_const2 = (
                     self.mult_const * self.freqs * self.inverse_sigma
                 ) * col_const
-                return self.filter.adjust_output(SXv - sub_const2, mult_dir).T
+                return (SXv - sub_const2).T
 
     def _matmat(self, other_matrix):
         return self._matmat_direction(other_matrix, self.direction)
@@ -947,9 +979,9 @@ class MultiSciPyStdXOperator(LinearOperator):
         corresponds to the "standard" binomial variance scaling.
     :type alpha: float
     :param custom_variance: Instead of using binomial variance, use provided custom variance
-        for mutations. Must be an array of length num_mutations, for example the result from
-        grapp.util.variance(). Default: None.
-    :type custom_variance: numpy.ndarray
+        for mutations. Can be a single array of length num_mutations (applied to all GRGs) or
+        a list of per-GRG arrays (one per GRG, each of length grg.num_mutations). Default: None.
+    :type custom_variance: numpy.ndarray or List[numpy.ndarray]
     """
 
     def __init__(
@@ -963,10 +995,12 @@ class MultiSciPyStdXOperator(LinearOperator):
         sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
         alpha: float = -1,
-        custom_variance: Optional[numpy.typing.NDArray] = None,
+        custom_variance: Optional[Union[numpy.typing.NDArray, List[numpy.typing.NDArray]]] = None,
     ):
         assert len(grgs) >= 1, "Must provide at least one GRG"
         assert len(grgs) == len(freqs), "Must provide allele frequencies for every GRG"
+        if isinstance(custom_variance, list):
+            assert len(custom_variance) == len(grgs), "custom_variance list length must match grgs"
         self.direction = direction
         self.num_mutations = sum([g.num_mutations for g in grgs])
         num_samples = grgs[0].num_samples
@@ -976,24 +1010,10 @@ class MultiSciPyStdXOperator(LinearOperator):
             self.num_mutations = len(mutation_filter)  # type: ignore
         prev_max_mut = 0
         self.operators = []
-        for g, f in zip(grgs, freqs):
+        for i, (g, f) in enumerate(zip(grgs, freqs)):
             assert g.num_samples == num_samples, "All GRGs must use the same samples"
-            if mutation_filter is not None:
-                grg_mut_filt = list(
-                    map(
-                        lambda m: m - prev_max_mut,
-                        filter(
-                            lambda m: m >= prev_max_mut
-                            and m < prev_max_mut + g.num_mutations,
-                            mutation_filter,
-                        ),
-                    )
-                )
-                # If we have an overall filter, but no filter for _this_ GRG, then we just skip it.
-                skip = len(grg_mut_filt) == 0
-            else:
-                grg_mut_filt = None
-                skip = False
+            grg_mut_filt, skip = _per_grg_mut_filt(mutation_filter, prev_max_mut, g)
+            grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
             if not skip:
                 self.operators.append(
                     SciPyStdXOperator(
@@ -1005,7 +1025,7 @@ class MultiSciPyStdXOperator(LinearOperator):
                         mutation_filter=grg_mut_filt,
                         sample_filter=sample_filter,
                         alpha=alpha,
-                        custom_variance=custom_variance,
+                        custom_variance=grg_custom_var,
                     )
                 )
             prev_max_mut += g.num_mutations
@@ -1231,3 +1251,98 @@ class MultiSciPyStdXXTOperator(LinearOperator):
         if vect.ndim != 2:
             vect = numpy.array([vect]).T
         return self._matvec(vect)
+
+
+class MultiSciPyLOCOStdXXTOperator(LinearOperator):
+    """
+    Multi-chromosome XX^T operator with native Leave-One-Chromosome-Out support.
+
+    Structurally mirrors :class:`MultiCuPyStdXXTOperator`: holds one
+    :class:`SciPyStdXXTOperator` per GRG and dispatches them in parallel through
+    a thread-pool scheduler. Adds :meth:`matvec_loco` for BOLT-LMM LOCO solves.
+    Default ``matvec``/``_matmat`` behavior is the standard sum across all
+    chromosomes (equivalent to :class:`MultiSciPyStdXXTOperator`).
+
+    :param grgs: List of GRGs (one per chromosome) sharing the same samples.
+    :param freqs: List of haploid allele frequencies (one ndarray per GRG).
+    :param custom_variance: Either a single ndarray (broadcast to every GRG) or
+        a list of per-GRG arrays.
+    :param threads: Worker count for the per-chrom scheduler.
+    """
+
+    def __init__(
+        self,
+        grgs: List[GRGType],
+        freqs: List[numpy.typing.NDArray],
+        dtype: TypeAlias = numpy.float64,
+        haploid: bool = False,
+        mutation_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
+        sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
+        threads: int = 1,
+        alpha: float = -1,
+        custom_variance: Optional[Union[numpy.typing.NDArray, List[numpy.typing.NDArray]]] = None,
+    ):
+        assert len(grgs) >= 1, "Must provide at least one GRG"
+        assert len(grgs) == len(freqs), "freqs must have one entry per GRG"
+        if isinstance(custom_variance, list):
+            assert len(custom_variance) == len(grgs), "custom_variance list length must match grgs"
+
+        self.operators: List[SciPyStdXXTOperator] = []
+        prev_max_mut = 0
+        for i, (g, f) in enumerate(zip(grgs, freqs)):
+            assert g.num_samples == grgs[0].num_samples, "All GRGs must share the same samples"
+            grg_mut_filt, skip = _per_grg_mut_filt(mutation_filter, prev_max_mut, g)
+            grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
+            if not skip:
+                self.operators.append(
+                    SciPyStdXXTOperator(
+                        g, f, dtype,
+                        haploid=haploid,
+                        mutation_filter=grg_mut_filt,
+                        sample_filter=sample_filter,
+                        alpha=alpha,
+                        custom_variance=grg_custom_var,
+                    )
+                )
+            prev_max_mut += g.num_mutations
+
+        assert len(self.operators) >= 1, "mutation_filter selected no mutations from any GRG"
+        self.scheduler = _wrap_grg(grgs[0]).make_scheduler(grgs, threads)
+        n = self.operators[0].shape[0]
+        super().__init__(dtype=dtype, shape=(n, n))
+
+    def _matmat(self, other_matrix, *, skip_op_idx: Optional[int] = None):
+        active = [
+            (i, op) for i, op in enumerate(self.operators)
+            if skip_op_idx is None or i != skip_op_idx
+        ]
+        if not active:
+            return numpy.zeros((self.shape[0], other_matrix.shape[1]), dtype=self.dtype)
+        futures = [
+            self.scheduler.submit(op.std_x_op.grg, SciPyStdXXTOperator._matmat, op, other_matrix)
+            for _, op in active
+        ]
+        result = futures[0].result()
+        for f in futures[1:]:
+            result = result + f.result()
+        return result
+
+    def _rmatmat(self, other_matrix):
+        return self._matmat(other_matrix)
+
+    def _matvec(self, vect):
+        if vect.ndim != 2:
+            vect = numpy.array([vect]).T
+        return self._matmat(vect)
+
+    def _rmatvec(self, vect):
+        if vect.ndim != 2:
+            vect = numpy.array([vect]).T
+        return self._matmat(vect)
+
+    def matvec_loco(self, v, *, exclude_op_idx: Optional[int] = None):
+        """Compute sum_{i != exclude_op_idx} X_i X_i^T @ v in parallel."""
+        was_vec = (v.ndim == 1)
+        v_col = v.reshape(-1, 1) if was_vec else v
+        result = self._matmat(v_col, skip_op_idx=exclude_op_idx)
+        return result[:, 0] if was_vec else result

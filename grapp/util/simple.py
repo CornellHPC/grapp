@@ -148,7 +148,6 @@ def allele_frequencies(
         num_samples = grg.num_samples if sample_filter is None else len(sample_filter)
         denominator = num_samples - miss_counts
         assert numpy.all(denominator >= 0)
-        print("denominator", denominator, "shape", acounts.shape )
         return numpy.divide(
             acounts,
             denominator,

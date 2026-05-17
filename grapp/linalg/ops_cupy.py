@@ -960,7 +960,8 @@ class MultiCuPyStdXOperator(LinearOperator):
     :param mutation_filter: Global mutation indices; remapped per GRG.
     :param threads: Thread-pool size.
     :param alpha: Variance power; default -1 gives 1/sigma scaling.
-    :param custom_variance: Per-GRG custom variance (passed as-is to each op).
+    :param custom_variance: Per-GRG custom variance. Can be a single array of length
+        num_mutations (applied to all GRGs) or a list of per-GRG arrays.
     """
 
     def __init__(
@@ -974,16 +975,19 @@ class MultiCuPyStdXOperator(LinearOperator):
         sample_filter: Optional[Union[List[int], numpy.ndarray]] = None,
         threads: int = 1,
         alpha: float = -1,
-        custom_variance: Optional[numpy.ndarray] = None,
+        custom_variance: Optional[Union[numpy.ndarray, List[numpy.ndarray]]] = None,
     ):
         assert len(grgs) >= 1, "Must provide at least one GRG"
         assert len(grgs) == len(freqs), "Must provide allele frequencies for every GRG"
+        if isinstance(custom_variance, list):
+            assert len(custom_variance) == len(grgs), "custom_variance list must have one entry per GRG"
         self.direction = direction
         self.operators: List[CuPyStdXOperator] = []
         prev_max_mut = 0
-        for g, f in zip(grgs, freqs):
+        for i, (g, f) in enumerate(zip(grgs, freqs)):
             assert g.num_samples == grgs[0].num_samples, "All GRGs must use the same samples"
             grg_mut_filt, skip = _build_per_grg_mut_filt(mutation_filter, prev_max_mut, g)
+            grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
             if not skip:
                 self.operators.append(
                     CuPyStdXOperator(
@@ -991,7 +995,7 @@ class MultiCuPyStdXOperator(LinearOperator):
                         mutation_filter=grg_mut_filt,
                         sample_filter=sample_filter,
                         alpha=alpha,
-                        custom_variance=custom_variance,
+                        custom_variance=grg_custom_var,
                     )
                 )
             prev_max_mut += g.num_mutations
@@ -1136,7 +1140,8 @@ class MultiCuPyStdXXTOperator(LinearOperator):
     costing 2 D2D copies per GRG instead of 4 (see MultiCuPyXXTOperator).
 
     :param freqs: List of per-GRG allele-frequency arrays.
-    :param custom_variance: Per-GRG custom variance (passed as-is to each op).
+    :param custom_variance: Per-GRG custom variance. Can be a single array of length
+        num_mutations (applied to all GRGs) or a list of per-GRG arrays.
     """
 
     def __init__(
@@ -1149,15 +1154,18 @@ class MultiCuPyStdXXTOperator(LinearOperator):
         sample_filter: Optional[Union[List[int], numpy.ndarray]] = None,
         threads: int = 1,
         alpha: float = -1,
-        custom_variance: Optional[numpy.ndarray] = None,
+        custom_variance: Optional[Union[numpy.ndarray, List[numpy.ndarray]]] = None,
     ):
         assert len(grgs) >= 1, "Must provide at least one GRG"
         assert len(grgs) == len(freqs), "Must provide allele frequencies for every GRG"
+        if isinstance(custom_variance, list):
+            assert len(custom_variance) == len(grgs), "custom_variance list must have one entry per GRG"
         self.operators: List[CuPyStdXXTOperator] = []
         prev_max_mut = 0
-        for g, f in zip(grgs, freqs):
+        for i, (g, f) in enumerate(zip(grgs, freqs)):
             assert g.num_samples == grgs[0].num_samples, "All GRGs must use the same samples"
             grg_mut_filt, skip = _build_per_grg_mut_filt(mutation_filter, prev_max_mut, g)
+            grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
             if not skip:
                 self.operators.append(
                     CuPyStdXXTOperator(
@@ -1165,7 +1173,7 @@ class MultiCuPyStdXXTOperator(LinearOperator):
                         mutation_filter=grg_mut_filt,
                         sample_filter=sample_filter,
                         alpha=alpha,
-                        custom_variance=custom_variance,
+                        custom_variance=grg_custom_var,
                     )
                 )
             prev_max_mut += g.num_mutations
@@ -1174,17 +1182,24 @@ class MultiCuPyStdXXTOperator(LinearOperator):
         n = self.operators[0].shape[0]
         super().__init__(dtype=dtype, shape=(n, n))
 
-    def _matmat(self, other_matrix):
+    def _matmat(self, other_matrix, *, skip_op_idx: Optional[int] = None):
         _call_counts[f"{type(self).__name__}._matmat"] = _call_counts.get(f"{type(self).__name__}._matmat", 0) + 1
         n, k = self.shape[0], other_matrix.shape[1]
-        futures = []
         with _nvtx("MultiStdXXTOp_matmat"):
+            active = [
+                (i, op) for i, op in enumerate(self.operators)
+                if skip_op_idx is None or i != skip_op_idx
+            ]
+            if not active:
+                with cuda.Device(self._output_device):
+                    return xp.zeros((n, k), dtype=self.dtype)
             parts = []
-            for _ in self.operators:
+            for _ in active:
                 with cuda.Device(self._output_device):
                     parts.append(xp.empty((n, k), dtype=self.dtype))
             self.scheduler.reset()
-            for op, part in zip(self.operators, parts):
+            futures = []
+            for (_, op), part in zip(active, parts):
                 futures.append(
                     self.scheduler.submit(
                         op.grg, CuPyStdXXTOperator._matmat, op, other_matrix, part
@@ -1213,3 +1228,14 @@ class MultiCuPyStdXXTOperator(LinearOperator):
             with cuda.Device(self._output_device):
                 vect = xp.asarray([vect]).T
         return self._rmatmat(vect)
+
+    def matvec_loco(self, v, *, exclude_op_idx: Optional[int] = None):
+        """Compute sum_{i != exclude_op_idx} X_i X_i^T @ v in parallel on GPU."""
+        was_vec = (v.ndim == 1)
+        if was_vec:
+            with cuda.Device(self._output_device):
+                v_col = xp.asarray(v).reshape(-1, 1)
+        else:
+            v_col = v
+        result = self._matmat(v_col, skip_op_idx=exclude_op_idx)
+        return result[:, 0] if was_vec else result
