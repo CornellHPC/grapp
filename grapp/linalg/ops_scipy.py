@@ -36,25 +36,6 @@ def _flip_dir(direction: TraversalDirection) -> TraversalDirection:
     return _UP if direction == _DOWN else _DOWN
 
 
-def _per_grg_mut_filt(mutation_filter, prev_max_mut, g):
-    """
-    Remap a global mutation_filter (indices into the concatenated multi-GRG space)
-    into a per-GRG filter (indices into this GRG's local mutation space).
-
-    :return: (grg_mut_filt, skip) — ``grg_mut_filt`` is None if no global filter,
-        else a list of local indices for this GRG. ``skip`` is True when the
-        global filter is set but selects no mutations from this GRG.
-    """
-    if mutation_filter is None:
-        return None, False
-    grg_mut_filt = [
-        m - prev_max_mut
-        for m in mutation_filter
-        if prev_max_mut <= m < prev_max_mut + g.num_mutations
-    ]
-    return grg_mut_filt, (len(grg_mut_filt) == 0)
-
-
 def _transpose_shape(shape: Tuple[int, int]) -> Tuple[int, int]:
     return (shape[1], shape[0])
 
@@ -979,9 +960,9 @@ class MultiSciPyStdXOperator(LinearOperator):
         corresponds to the "standard" binomial variance scaling.
     :type alpha: float
     :param custom_variance: Instead of using binomial variance, use provided custom variance
-        for mutations. Can be a single array of length num_mutations (applied to all GRGs) or
-        a list of per-GRG arrays (one per GRG, each of length grg.num_mutations). Default: None.
-    :type custom_variance: numpy.ndarray or List[numpy.ndarray]
+        for mutations. Must be an array of length num_mutations, for example the result from
+        grapp.util.variance(). Default: None.
+    :type custom_variance: numpy.ndarray
     """
 
     def __init__(
@@ -995,12 +976,10 @@ class MultiSciPyStdXOperator(LinearOperator):
         sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
         alpha: float = -1,
-        custom_variance: Optional[Union[numpy.typing.NDArray, List[numpy.typing.NDArray]]] = None,
+        custom_variance: Optional[numpy.typing.NDArray] = None,
     ):
         assert len(grgs) >= 1, "Must provide at least one GRG"
         assert len(grgs) == len(freqs), "Must provide allele frequencies for every GRG"
-        if isinstance(custom_variance, list):
-            assert len(custom_variance) == len(grgs), "custom_variance list length must match grgs"
         self.direction = direction
         self.num_mutations = sum([g.num_mutations for g in grgs])
         num_samples = grgs[0].num_samples
@@ -1010,10 +989,24 @@ class MultiSciPyStdXOperator(LinearOperator):
             self.num_mutations = len(mutation_filter)  # type: ignore
         prev_max_mut = 0
         self.operators = []
-        for i, (g, f) in enumerate(zip(grgs, freqs)):
+        for g, f in zip(grgs, freqs):
             assert g.num_samples == num_samples, "All GRGs must use the same samples"
-            grg_mut_filt, skip = _per_grg_mut_filt(mutation_filter, prev_max_mut, g)
-            grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
+            if mutation_filter is not None:
+                grg_mut_filt = list(
+                    map(
+                        lambda m: m - prev_max_mut,
+                        filter(
+                            lambda m: m >= prev_max_mut
+                            and m < prev_max_mut + g.num_mutations,
+                            mutation_filter,
+                        ),
+                    )
+                )
+                # If we have an overall filter, but no filter for _this_ GRG, then we just skip it.
+                skip = len(grg_mut_filt) == 0
+            else:
+                grg_mut_filt = None
+                skip = False
             if not skip:
                 self.operators.append(
                     SciPyStdXOperator(
@@ -1025,7 +1018,7 @@ class MultiSciPyStdXOperator(LinearOperator):
                         mutation_filter=grg_mut_filt,
                         sample_filter=sample_filter,
                         alpha=alpha,
-                        custom_variance=grg_custom_var,
+                        custom_variance=custom_variance,
                     )
                 )
             prev_max_mut += g.num_mutations
@@ -1276,8 +1269,6 @@ class MultiSciPyLOCOStdXXTOperator(LinearOperator):
         freqs: List[numpy.typing.NDArray],
         dtype: TypeAlias = numpy.float64,
         haploid: bool = False,
-        mutation_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
-        sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
         alpha: float = -1,
         custom_variance: Optional[Union[numpy.typing.NDArray, List[numpy.typing.NDArray]]] = None,
@@ -1288,25 +1279,19 @@ class MultiSciPyLOCOStdXXTOperator(LinearOperator):
             assert len(custom_variance) == len(grgs), "custom_variance list length must match grgs"
 
         self.operators: List[SciPyStdXXTOperator] = []
-        prev_max_mut = 0
         for i, (g, f) in enumerate(zip(grgs, freqs)):
             assert g.num_samples == grgs[0].num_samples, "All GRGs must share the same samples"
-            grg_mut_filt, skip = _per_grg_mut_filt(mutation_filter, prev_max_mut, g)
             grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
-            if not skip:
-                self.operators.append(
-                    SciPyStdXXTOperator(
-                        g, f, dtype,
-                        haploid=haploid,
-                        mutation_filter=grg_mut_filt,
-                        sample_filter=sample_filter,
-                        alpha=alpha,
-                        custom_variance=grg_custom_var,
-                    )
+            self.operators.append(
+                SciPyStdXXTOperator(
+                    g, f, dtype,
+                    haploid=haploid,
+                    alpha=alpha,
+                    custom_variance=grg_custom_var,
                 )
-            prev_max_mut += g.num_mutations
+            )
 
-        assert len(self.operators) >= 1, "mutation_filter selected no mutations from any GRG"
+        assert len(self.operators) >= 1
         self.scheduler = _wrap_grg(grgs[0]).make_scheduler(grgs, threads)
         n = self.operators[0].shape[0]
         super().__init__(dtype=dtype, shape=(n, n))

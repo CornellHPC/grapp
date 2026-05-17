@@ -519,7 +519,6 @@ def bolt_lmm_inf(
     max_iter: int = DEFAULT_MAX_ITERS,
     seed: int = BOLT_RANDOM_SEED,
     threads: int = 1,
-    local_idx_filter_by_chrom: Optional[Dict[Any, Any]] = None,
 ) -> Tuple[VarianceFit, CalibrationResult, Dict, pd.DataFrame]:
     """
     Run BOLT-LMM-inf on one or more chromosomes.
@@ -527,9 +526,6 @@ def bolt_lmm_inf(
     :param chrom_grgs: List of (chromosome_label, GRGCalcInterface), one per chromosome.
     :param y: Phenotype vector of length n_individuals.
     :param covariates: Orthonormal covariate basis (includes intercept).
-    :param local_idx_filter_by_chrom: Optional {chrom: collection of int local_idx}. When
-        provided, only variants whose local_idx appears in the given set are used for that
-        chromosome. Useful for aligning grapp to a BIM-matched variant set from grg-spmv.
     :returns: (VarianceFit, CalibrationResult, residuals_dict, results_dataframe)
     """
     cg_stats = CgStats()
@@ -538,9 +534,6 @@ def bolt_lmm_inf(
     chrom_all_stats: List[List[BoltVariantStats]] = []
     for chrom, grg in chrom_grgs:
         stats = compute_bolt_variant_stats(grg, covariates, grg.num_individuals)
-        if local_idx_filter_by_chrom is not None:
-            allowed = local_idx_filter_by_chrom.get(chrom, set())
-            stats = [s for s in stats if s.local_idx in allowed]
         chrom_all_stats.append(stats)
 
     # Build ops

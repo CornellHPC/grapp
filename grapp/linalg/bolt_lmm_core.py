@@ -21,7 +21,10 @@ from grapp.linalg.ops_scipy import (
     SciPyStdXOperator,
     MultiSciPyLOCOStdXXTOperator,
 )
-from grapp.util.simple import allele_counts, allele_frequencies
+from grapp.util.simple import (
+    allele_counts, allele_counts_cupy,
+    allele_frequencies, allele_frequencies_cupy,
+)
 
 
 DTYPE = np.dtype(np.float64)
@@ -58,6 +61,9 @@ def _dot(left, right) -> float:
     xp = _array_module(left)
     return _as_float(xp.sum(left * right))
 
+def _to_np(arr) -> np.ndarray:
+    """Convert CuPy or NumPy array to NumPy."""
+    return arr.get() if hasattr(arr, "get") else np.asarray(arr)
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -517,7 +523,7 @@ class BoltLmmOps:
         self._chrom_to_op_idx: Dict[Any, int] = {}
         self._model_stats_by_chrom: Dict[Any, List[BoltVariantStats]] = {}
         self._local_idx_to_pos: Dict[Any, Dict[int, int]] = {}
-        self._is_gpu: bool = False
+        self._is_cupy: bool = False
         self._xp = np
 
     def setup(self) -> "BoltLmmOps":
@@ -530,12 +536,12 @@ class BoltLmmOps:
             )
 
         # Detect GPU backend
-        self._is_gpu = bool(
+        self._is_cupy = bool(
             grgs_list
             and isinstance(grgs_list[0], GRGSpMVCalculator)
             and getattr(grgs_list[0], "use_cupy", False)
         )
-        if self._is_gpu:
+        if self._is_cupy:
             import cupy
             self._xp = cupy
 
@@ -544,7 +550,7 @@ class BoltLmmOps:
         active_vars: List[np.ndarray] = []
 
         for (chrom, grg), stats in zip(self._chrom_grgs, self._chrom_stats):
-            model_stats = [s for s in stats if s.is_model_variant]
+            model_stats = stats
             self._model_stats_by_chrom[chrom] = model_stats
             self._local_idx_to_pos[chrom] = {
                 s.local_idx: pos for pos, s in enumerate(model_stats)
@@ -553,46 +559,37 @@ class BoltLmmOps:
             if not model_stats:
                 continue
 
-            model_indices = np.array([s.local_idx for s in model_stats], dtype=np.int64)
             mcn2 = np.array([s.mean_center_norm2 for s in model_stats], dtype=np.float64)
             var_c = mcn2 / float(self._n - 1)
 
-            freqs_full = allele_frequencies(grg)
-            freqs_c = freqs_full[model_indices]
+            freqs_c = allele_frequencies_cupy(grg) if self._is_cupy else allele_frequencies(grg)
 
             m_c = len(model_stats)
             self._m_proj += m_c
             self._m_proj_by_chrom[chrom] = m_c
             self._xfro2 += float(sum(s.x_norm2 for s in model_stats))
 
-            if self._is_gpu:
+            if self._is_cupy:
                 from grapp.linalg.ops_cupy import CuPyStdXOperator
                 self._x_ops[chrom] = CuPyStdXOperator(
-                    grg, _UP, freqs_c, mutation_filter=model_indices.tolist(),
+                    grg, _UP, freqs_c,
                     custom_variance=var_c,
                 )
             else:
                 self._x_ops[chrom] = SciPyStdXOperator(
-                    grg, _UP, freqs_c, mutation_filter=model_indices.tolist(),
+                    grg, _UP, freqs_c,
                     custom_variance=var_c,
                 )
 
-            # The K (XXT) operator has no mutation_filter, so it operates on the
-            # full GRG mutation space. Pass full-length arrays with zeros at
-            # non-model positions so inverse_sigma has shape (num_mutations,).
-            # Non-model mutations get variance=0 → they contribute 0 to K.
-            var_c_full = np.zeros(grg.num_mutations, dtype=np.float64)
-            var_c_full[model_indices] = var_c
-
             self._chrom_to_op_idx[chrom] = len(active_grgs)
             active_grgs.append(grg)
-            active_freqs.append(freqs_full)
-            active_vars.append(var_c_full)
+            active_freqs.append(freqs_c)
+            active_vars.append(var_c)
 
         if self._m_proj <= 0:
-            raise ValueError("no eligible model variants after filtering")
+            raise ValueError("no eligible model variants")
 
-        if self._is_gpu:
+        if self._is_cupy:
             from grapp.linalg.ops_cupy import MultiCuPyStdXXTOperator
             self._k_all_op = MultiCuPyStdXXTOperator(
                 active_grgs, active_freqs,
@@ -727,10 +724,22 @@ def compute_bolt_variant_stats(
     grg = _wrap_grg(grg)
     n = int(n_individuals)
 
+    use_cupy = getattr(grg, 'use_cupy', False)
+    if use_cupy:
+        import cupy as cp
+        xp = cp
+    else:
+        xp = np
+
     # Allele counts and missingness
-    acount_raw, miss_raw = allele_counts(grg, return_missing=True)
-    acount = np.asarray(acount_raw, dtype=np.float64)
-    miss = np.asarray(miss_raw, dtype=np.float64)
+    if use_cupy:
+        acount_raw, miss_raw = allele_counts_cupy(grg, return_missing=True)
+        acount = _to_np(acount_raw).astype(np.float64)
+        miss = _to_np(miss_raw).astype(np.float64)
+    else:
+        acount_raw, miss_raw = allele_counts(grg, return_missing=True)
+        acount = np.asarray(acount_raw, dtype=np.float64)
+        miss = np.asarray(miss_raw, dtype=np.float64)
 
     # Effective sample count and diploid mean per variant
     n_eff = n - miss / grg.ploidy
@@ -740,12 +749,12 @@ def compute_bolt_variant_stats(
     # sumsq_g = diag(X_indiv^T X_indiv)_j = sum_i g_ij^2, g_ij in {0,1,2}.
     # init="xtx" with by_individual=True computes the individual-level squared sum,
     # matching the native BED-based computation (sumsq_lut[g].sum() = sum_i g_ij^2).
-    sumsq_g = grg.matmul(
-        np.ones((1, grg.num_individuals), dtype=np.float64),
+    sumsq_g = _to_np(grg.matmul(
+        xp.ones((1, grg.num_individuals), dtype=np.float64),
         pygrgl.TraversalDirection.UP,
         by_individual=True,
         init="xtx",
-    ).squeeze().astype(np.float64)
+    )).squeeze().astype(np.float64)
 
     #TODO: this is not good with missing data!
 
@@ -766,11 +775,11 @@ def compute_bolt_variant_stats(
     for k in range(covariates.cindep):
         q_k = Q[:, k].astype(np.float64)
         sum_qk = float(np.sum(q_k))
-        raw_scores = grg.matmul(
-            q_k.reshape(1, -1),
+        raw_scores = _to_np(grg.matmul(
+            xp.asarray(q_k).reshape(1, -1),
             pygrgl.TraversalDirection.UP,
             by_individual=True,
-        ).squeeze().astype(np.float64)
+        )).squeeze().astype(np.float64)
         score_k = raw_scores - diploid_mean * sum_qk
         sum_sq_proj += score_k * score_k
 
