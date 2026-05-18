@@ -1205,6 +1205,7 @@ class MultiCuPyStdXXTOperator(LinearOperator):
             for f in futures:
                 f.result()
             with cuda.Device(self._output_device):
+                cuda.Device(self._output_device).synchronize()
                 result = sum(parts[1:], parts[0])
                 xp.cuda.get_current_stream().synchronize()
             return result

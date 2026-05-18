@@ -654,8 +654,9 @@ class BoltLmmOps:
 
     def apply_x(self, chrom, w) -> np.ndarray:
         """project(X @ w) for model variants of this chromosome."""
-        result = self._x_ops[chrom].matvec(w)
-        return self.project(result)
+        w_dev = self._xp.asarray(w, dtype=DTYPE)
+        result = self._x_ops[chrom].matvec(w_dev)
+        return self._covariates.project_device(result)
 
     def column(self, chrom, local_idx: int) -> np.ndarray:
         """The projected column x_i of the standardized X for one model variant."""
@@ -671,16 +672,22 @@ class BoltLmmOps:
 
     def apply_k(self, v, *, exclude_chrom=None) -> np.ndarray:
         """(1/m_loco) * X_loco @ X_loco^T @ project(v), then project."""
-        v_proj = self.project(v)
+        if exclude_chrom is not None and exclude_chrom not in self._chrom_to_op_idx:
+            raise KeyError(
+                f"exclude_chrom={exclude_chrom!r} not in active chroms "
+                f"{sorted(self._chrom_to_op_idx.keys())}"
+            )
+        v_dev = self._xp.asarray(v, dtype=DTYPE)
+        v_proj = self._covariates.project_device(v_dev)
         exclude_idx = (
-            self._chrom_to_op_idx.get(exclude_chrom)
+            self._chrom_to_op_idx[exclude_chrom]
             if exclude_chrom is not None else None
         )
         xxt_v = self._k_all_op.matvec_loco(v_proj, exclude_op_idx=exclude_idx)
 
         m = self._m_proj
         if exclude_chrom is not None:
-            m -= self._m_proj_by_chrom.get(exclude_chrom, 0)
+            m -= self._m_proj_by_chrom[exclude_chrom]
         if m <= 0:
             return self._xp.zeros(self._n, dtype=DTYPE)
         result = xxt_v / float(m)
@@ -847,7 +854,7 @@ def compute_lmm_inf_results(
             lmm_scores_compact    = np.asarray(lmm_scores_compact)
 
         pos_by_local = ops._local_idx_to_pos[chrom]
-        freqs_full = allele_frequencies(grg)
+        freqs_full = _to_np(allele_frequencies_cupy(grg)) if ops._is_cupy else allele_frequencies(grg)
 
         for stat in all_stats:
             local_idx = stat.local_idx
