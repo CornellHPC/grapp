@@ -647,6 +647,13 @@ class BoltLmmOps:
     # Per-chromosome operations
     # ------------------------------------------------------------------
 
+    def _device_ctx(self, chrom):
+        if not self._is_cupy:
+            return contextlib.nullcontext()
+        import cupy as cp
+        dev = getattr(self._x_ops[chrom], "_device", None)
+        return cp.cuda.Device(dev) if dev is not None else contextlib.nullcontext()
+
     def scores(self, chrom, v) -> np.ndarray:
         """X^T @ project(v) for model variants of this chromosome (compact array)."""
         v_proj = self.project(v)
@@ -654,7 +661,8 @@ class BoltLmmOps:
 
     def apply_x(self, chrom, w) -> np.ndarray:
         """project(X @ w) for model variants of this chromosome."""
-        w_dev = self._xp.asarray(w, dtype=DTYPE)
+        with self._device_ctx(chrom):
+            w_dev = self._xp.asarray(w, dtype=DTYPE)
         result = self._x_ops[chrom].matvec(w_dev)
         return self._covariates.project_device(result)
 
@@ -662,8 +670,9 @@ class BoltLmmOps:
         """The projected column x_i of the standardized X for one model variant."""
         pos = self._local_idx_to_pos[chrom][int(local_idx)]
         m = len(self._model_stats_by_chrom[chrom])
-        w = self._xp.zeros(m, dtype=DTYPE)
-        w[pos] = 1.0
+        with self._device_ctx(chrom):
+            w = self._xp.zeros(m, dtype=DTYPE)
+            w[pos] = 1.0
         return self.apply_x(chrom, w)
 
     # ------------------------------------------------------------------
@@ -735,8 +744,10 @@ def compute_bolt_variant_stats(
     if use_cupy:
         import cupy as cp
         xp = cp
+        dev_ctx = lambda: cp.cuda.Device(grg.device)
     else:
         xp = np
+        dev_ctx = contextlib.nullcontext
 
     # Allele counts and missingness
     if use_cupy:
@@ -756,8 +767,11 @@ def compute_bolt_variant_stats(
     # sumsq_g = diag(X_indiv^T X_indiv)_j = sum_i g_ij^2, g_ij in {0,1,2}.
     # init="xtx" with by_individual=True computes the individual-level squared sum,
     # matching the native BED-based computation (sumsq_lut[g].sum() = sum_i g_ij^2).
+    with dev_ctx():
+        inp = xp.ones((1, grg.num_individuals), dtype=np.float64)
+
     sumsq_g = _to_np(grg.matmul(
-        xp.ones((1, grg.num_individuals), dtype=np.float64),
+        inp,
         pygrgl.TraversalDirection.UP,
         by_individual=True,
         init="xtx",
@@ -782,8 +796,10 @@ def compute_bolt_variant_stats(
     for k in range(covariates.cindep):
         q_k = Q[:, k].astype(np.float64)
         sum_qk = float(np.sum(q_k))
+        with dev_ctx():
+            q_dev = xp.asarray(q_k).reshape(1, -1)
         raw_scores = _to_np(grg.matmul(
-            xp.asarray(q_k).reshape(1, -1),
+            q_dev,
             pygrgl.TraversalDirection.UP,
             by_individual=True,
         )).squeeze().astype(np.float64)

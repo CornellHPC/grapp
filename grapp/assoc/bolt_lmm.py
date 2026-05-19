@@ -533,6 +533,7 @@ def bolt_lmm_inf(
     # Compute per-variant stats for each chromosome
     chrom_all_stats: List[List[BoltVariantStats]] = []
     for chrom, grg in chrom_grgs:
+        #TODO: parallelilize this
         stats = compute_bolt_variant_stats(grg, covariates, grg.num_individuals)
         chrom_all_stats.append(stats)
 
