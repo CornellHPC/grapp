@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from grapp.grg_calculator import GRGCalcInterface
-from grapp.linalg.bolt_lmm_core import (
+from grapp.bolt.lmm_core import (
     DTYPE,
     BOLT_RANDOM_SEED,
     DEFAULT_NUM_CALIB_SNPS,

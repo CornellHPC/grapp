@@ -1,4 +1,5 @@
 *.grg
+.DS_Store
 __pycache__/
 *.egg-info/
 build/

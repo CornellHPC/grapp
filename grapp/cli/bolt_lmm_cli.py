@@ -7,10 +7,10 @@ import numpy as np
 import pandas
 
 from grapp.assoc import read_pheno, read_plink_covariates
-from grapp.assoc.bolt_lmm import bolt_lmm_inf
+from grapp.bolt.lmm import bolt_lmm_inf
 from grapp.cli.util import pandas_to_tsv
 from grapp.grg_calculator import load_grg_calculator
-from grapp.linalg.bolt_lmm_core import CovariateBasis
+from grapp.bolt.lmm_core import CovariateBasis
 
 
 def add_options(subparser):
