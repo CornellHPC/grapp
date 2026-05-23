@@ -25,6 +25,7 @@ import pygrgl
 from grapp.grg_calculator import GRGCalcInterface, GRGSpMVCalculator, _wrap_grg
 from grapp.linalg.ops_scipy import (
     SciPyStdXOperator,
+    MultiSciPyStdXOperator,
     MultiSciPyLOCOStdXXTOperator,
 )
 from grapp.util.simple import (
@@ -535,6 +536,7 @@ class BoltLmmOps:
 
         self._x_ops: Dict[Any, Any] = {}
         self._k_all_op: Any = None
+        self._x_all_op: Any = None
         self._chrom_to_op_idx: Dict[Any, int] = {}
         self._model_stats_by_chrom: Dict[Any, List[BoltVariantStats]] = {}
         self._local_idx_to_pos: Dict[Any, Dict[int, int]] = {}
@@ -618,6 +620,22 @@ class BoltLmmOps:
                 threads=self._threads,
             )
 
+        # Multi-chromosome standardized-X operator (sum_c X_c @ w_c) for batched
+        # MC probe generation; the X analog of the K_all operator above.
+        if self._is_cupy:
+            from grapp.linalg.ops_cupy import MultiCuPyStdXOperator
+            self._x_all_op = MultiCuPyStdXOperator(
+                active_grgs, _UP, active_freqs,
+                custom_variance=active_vars,
+                threads=self._threads,
+            )
+        else:
+            self._x_all_op = MultiSciPyStdXOperator(
+                active_grgs, _UP, active_freqs,
+                custom_variance=active_vars,
+                threads=self._threads,
+            )
+
         return self
 
     # ------------------------------------------------------------------
@@ -680,6 +698,25 @@ class BoltLmmOps:
             w_dev = self._xp.asarray(w, dtype=DTYPE)
         result = self._x_ops[chrom].matvec(w_dev)
         return self._covariates.project_device(result)
+
+    def apply_x_all(self, weights) -> Any:
+        """project(sum_c X_c @ w_c) for a (m_proj, k) weight matrix whose rows are in
+        active-chromosome (operator) order and whose columns are the k probe vectors.
+
+        The Multi-X operator does the per-chromosome matmuls and the cross-device sum;
+        projection is applied once here on the (n, k) result.
+        """
+        # Pass a HOST array: the operator uploads each chromosome's row-slice straight
+        # to that chromosome's device (host->device), avoiding a cross-device GPU copy
+        # of a (possibly non-contiguous) slice. The reduction + projection are pinned to
+        # the operator's output device so the covariate basis and result share a device.
+        W = np.asarray(weights, dtype=DTYPE)
+        if not self._is_cupy:
+            return self._covariates.project_device(self._x_all_op.matmat(W))
+        import cupy as cp
+        with cp.cuda.Device(self._x_all_op._output_device):
+            result = self._x_all_op.matmat(W)  # (n, k), unprojected, on output device
+            return self._covariates.project_device(result)
 
     def column(self, chrom, local_idx: int) -> np.ndarray:
         """The projected column x_i of the standardized X for one model variant."""
@@ -767,6 +804,7 @@ def _generate_bolt_mc_components(
     trials: int,
     seed: int,
     rng_kind: str = "numpy",
+    batched_apply_x: bool = False,
 ) -> Tuple[List[Any], List[Any], Any]:
     if rng_kind not in ("numpy", "boost"):
         raise ValueError(f"unknown rng_kind {rng_kind!r}; expected 'numpy' or 'boost'")
@@ -806,16 +844,23 @@ def _generate_bolt_mc_components(
             )
         noise = gen.standard_normal((int(trials), int(ops.n)))
 
-    g_rand: List[Any] = []
     e_rand: List[Any] = []
 
-    for trial in range(int(trials)):
-        g = xp.zeros((ops.n,), dtype=DTYPE)
-        for chrom, chrom_w in weights_by_chrom.items():
-            w = xp.asarray(chrom_w[trial], dtype=DTYPE)
-            g = g + ops.apply_x(chrom, w)
-        ops.project_inplace(g)
-        g_rand.append(g)
+    # g_rand[t] = project(sum_c X_c @ w_{c,t}). Stack the per-chrom (trials, m_c) weight
+    # blocks into a single (m_proj, trials) matrix in operator (active-chrom) order. Both
+    # paths go through the Multi-X operator (ops.apply_x_all); they differ only in matmat
+    # batch width: all trials at once vs. one probe column per call.
+    ordered_w = [weights_by_chrom[chrom].T for chrom in ops.chroms if chrom in weights_by_chrom]
+    W = np.concatenate(ordered_w, axis=0)  # (m_proj, trials)
+
+    if batched_apply_x:
+        G = ops.apply_x_all(W)              # (n, trials), projected
+        g_rand: List[Any] = [G[:, t].copy() for t in range(int(trials))]
+    else:
+        g_rand = []
+        for t in range(int(trials)):
+            g = ops.apply_x_all(W[:, t:t + 1])  # (n, 1), projected
+            g_rand.append(g[:, 0].copy())
 
     if rng_kind == "boost":
         for _trial in range(int(trials)):
@@ -937,10 +982,12 @@ def fit_bolt_variance_components(
     max_iter: int,
     stats: CgStats,
     rng_kind: str = "numpy",
+    batched_apply_x: bool = False,
 ) -> VarianceFit:
     trials = max(2, int(mc_trials))
     g_rand, e_rand, y_dev = _generate_bolt_mc_components(
-        ops, y, trials=trials, seed=int(seed), rng_kind=rng_kind
+        ops, y, trials=trials, seed=int(seed), rng_kind=rng_kind,
+        batched_apply_x=batched_apply_x,
     )
 
     def evaluate(log_delta: float) -> McScalingResult:

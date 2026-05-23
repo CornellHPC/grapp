@@ -960,9 +960,9 @@ class MultiSciPyStdXOperator(LinearOperator):
         corresponds to the "standard" binomial variance scaling.
     :type alpha: float
     :param custom_variance: Instead of using binomial variance, use provided custom variance
-        for mutations. Must be an array of length num_mutations, for example the result from
-        grapp.util.variance(). Default: None.
-    :type custom_variance: numpy.ndarray
+        for mutations. Can be a single array of length num_mutations (applied to all GRGs, e.g.
+        the result from grapp.util.variance()) or a list of per-GRG arrays. Default: None.
+    :type custom_variance: Optional[Union[numpy.ndarray, List[numpy.ndarray]]]
     """
 
     def __init__(
@@ -976,10 +976,12 @@ class MultiSciPyStdXOperator(LinearOperator):
         sample_filter: Optional[Union[List[int], numpy.typing.NDArray]] = None,
         threads: int = 1,
         alpha: float = -1,
-        custom_variance: Optional[numpy.typing.NDArray] = None,
+        custom_variance: Optional[Union[numpy.typing.NDArray, List[numpy.typing.NDArray]]] = None,
     ):
         assert len(grgs) >= 1, "Must provide at least one GRG"
         assert len(grgs) == len(freqs), "Must provide allele frequencies for every GRG"
+        if isinstance(custom_variance, list):
+            assert len(custom_variance) == len(grgs), "custom_variance list must have one entry per GRG"
         self.direction = direction
         self.num_mutations = sum([g.num_mutations for g in grgs])
         num_samples = grgs[0].num_samples
@@ -989,8 +991,9 @@ class MultiSciPyStdXOperator(LinearOperator):
             self.num_mutations = len(mutation_filter)  # type: ignore
         prev_max_mut = 0
         self.operators = []
-        for g, f in zip(grgs, freqs):
+        for i, (g, f) in enumerate(zip(grgs, freqs)):
             assert g.num_samples == num_samples, "All GRGs must use the same samples"
+            grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
             if mutation_filter is not None:
                 grg_mut_filt = list(
                     map(
@@ -1018,7 +1021,7 @@ class MultiSciPyStdXOperator(LinearOperator):
                         mutation_filter=grg_mut_filt,
                         sample_filter=sample_filter,
                         alpha=alpha,
-                        custom_variance=custom_variance,
+                        custom_variance=grg_custom_var,
                     )
                 )
             prev_max_mut += g.num_mutations

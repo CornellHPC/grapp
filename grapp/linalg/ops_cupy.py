@@ -109,7 +109,14 @@ def _xdev_asarray(src):
     """
     if force_host_xdev_copy and hasattr(src, "get"):
         return xp.asarray(src.get())
-    if hasattr(src, "device") and src.device.id != xp.cuda.Device().id:
+    dev = getattr(src, "device", None)
+    # Host arrays expose .device == 'cpu' (a str) under NumPy >= 2.0; only treat
+    # genuine CuPy devices (which carry an .id) as candidates for a D2D copy.
+    if dev is not None and hasattr(dev, "id") and dev.id != xp.cuda.Device().id:
+        # CuPy cannot copy a non-contiguous array across devices; make the source
+        # contiguous on its own device first, then do the D2D copy.
+        with cuda.Device(dev):
+            src = xp.ascontiguousarray(src)
         return xp.array(src)  # explicit D2D copy to current device
     return xp.asarray(src)
 
@@ -960,7 +967,8 @@ class MultiCuPyStdXOperator(LinearOperator):
     :param mutation_filter: Global mutation indices; remapped per GRG.
     :param threads: Thread-pool size.
     :param alpha: Variance power; default -1 gives 1/sigma scaling.
-    :param custom_variance: Per-GRG custom variance (passed as-is to each op).
+    :param custom_variance: Custom variance. Can be a single array of length num_mutations
+        (applied to all GRGs) or a list of per-GRG arrays.
     """
 
     def __init__(
@@ -974,16 +982,19 @@ class MultiCuPyStdXOperator(LinearOperator):
         sample_filter: Optional[Union[List[int], numpy.ndarray]] = None,
         threads: int = 1,
         alpha: float = -1,
-        custom_variance: Optional[numpy.ndarray] = None,
+        custom_variance: Optional[Union[numpy.ndarray, List[numpy.ndarray]]] = None,
     ):
         assert len(grgs) >= 1, "Must provide at least one GRG"
         assert len(grgs) == len(freqs), "Must provide allele frequencies for every GRG"
+        if isinstance(custom_variance, list):
+            assert len(custom_variance) == len(grgs), "custom_variance list must have one entry per GRG"
         self.direction = direction
         self.operators: List[CuPyStdXOperator] = []
         prev_max_mut = 0
-        for g, f in zip(grgs, freqs):
+        for i, (g, f) in enumerate(zip(grgs, freqs)):
             assert g.num_samples == grgs[0].num_samples, "All GRGs must use the same samples"
             grg_mut_filt, skip = _build_per_grg_mut_filt(mutation_filter, prev_max_mut, g)
+            grg_custom_var = custom_variance[i] if isinstance(custom_variance, list) else custom_variance
             if not skip:
                 self.operators.append(
                     CuPyStdXOperator(
@@ -991,7 +1002,7 @@ class MultiCuPyStdXOperator(LinearOperator):
                         mutation_filter=grg_mut_filt,
                         sample_filter=sample_filter,
                         alpha=alpha,
-                        custom_variance=custom_variance,
+                        custom_variance=grg_custom_var,
                     )
                 )
             prev_max_mut += g.num_mutations
