@@ -7,7 +7,7 @@ import numpy as np
 import pandas
 
 from grapp.assoc import read_pheno, read_plink_covariates
-from grapp.bolt.lmm import bolt_lmm_inf
+from grapp.bolt.lmm import bolt_lmm_inf, lmm_inf_stats_to_dataframe
 from grapp.cli.util import pandas_to_tsv
 from grapp.grg_calculator import load_grg_calculator
 from grapp.bolt.lmm_core import CovariateBasis
@@ -135,7 +135,7 @@ def run(args):
     else:
         covariates = CovariateBasis.intercept_only(n)
 
-    fit, calibration, _residuals, results_df = bolt_lmm_inf(
+    fit, calibration, _residuals, stats = bolt_lmm_inf(
         chrom_grgs,
         y,
         covariates,
@@ -147,6 +147,7 @@ def run(args):
         threads=args.jobs,
         rng_kind=args.rng,
     )
+    results_df = lmm_inf_stats_to_dataframe(stats, chrom_grgs)
 
     print(
         f"BOLT-LMM-inf: h2={fit.h2:.4f} sigma_g2={fit.sigma_g2:.4g} "
