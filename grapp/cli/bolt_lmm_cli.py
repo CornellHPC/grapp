@@ -80,6 +80,13 @@ def add_options(subparser):
         help="Random seed (default: 12345).",
     )
     subparser.add_argument(
+        "--rng",
+        choices=["numpy", "boost"],
+        default="numpy",
+        help="RNG for MC variance-component probes: 'numpy' (fast, default) or "
+             "'boost' (slower, bit-matches BOLT-LMM reference). Default: numpy.",
+    )
+    subparser.add_argument(
         "-j",
         "--jobs",
         type=int,
@@ -138,6 +145,7 @@ def run(args):
         max_iter=args.max_iter,
         seed=args.seed,
         threads=args.jobs,
+        rng_kind=args.rng,
     )
 
     print(

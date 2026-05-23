@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Sequence
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from grapp.grg_calculator import GRGCalcInterface
+from grapp.grg_calculator import GRGCalcInterface, _wrap_grg
 from grapp.bolt.lmm_core import (
     DTYPE,
     BOLT_RANDOM_SEED,
@@ -32,8 +33,12 @@ from grapp.bolt.lmm_core import (
     McScalingResult,
     VarianceFit,
     compute_bolt_variant_stats,
-    compute_lmm_inf_results,
+    compute_lmm_inf_stats,
+    lmm_inf_stats_to_dataframe,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -69,10 +74,12 @@ def _generate_bolt_mc_components(
     *,
     trials: int,
     seed: int,
+    rng_kind: str = "numpy",
 ) -> Tuple[List[Any], List[Any], Any]:
+    if rng_kind not in ("numpy", "boost"):
+        raise ValueError(f"unknown rng_kind {rng_kind!r}; expected 'numpy' or 'boost'")
+
     xp = ops.xp
-    rng = BoostMt19937(int(seed) + 1)
-    randn = BoostNormalDistribution()
     inv_sqrt_m = 1.0 / math.sqrt(float(ops.m_proj))
 
     weights_by_chrom: Dict[Any, np.ndarray] = {
@@ -81,14 +88,31 @@ def _generate_bolt_mc_components(
         if ops.model_stats_for(chrom)
     }
 
-    for chrom in ops.chroms:
-        model_stats = ops.model_stats_for(chrom)
-        if not model_stats:
-            continue
-        chrom_weights = weights_by_chrom[chrom]
-        for pos, stat in enumerate(model_stats):
-            for trial in range(int(trials)):
-                chrom_weights[trial, pos] = randn(rng) * inv_sqrt_m
+    if rng_kind == "boost":
+        # Scalar Boost-compatible draws: bit-matches the BOLT-LMM reference.
+        rng = BoostMt19937(int(seed) + 1)
+        randn = BoostNormalDistribution()
+        for chrom in ops.chroms:
+            model_stats = ops.model_stats_for(chrom)
+            if not model_stats:
+                continue
+            chrom_weights = weights_by_chrom[chrom]
+            for pos, stat in enumerate(model_stats):
+                for trial in range(int(trials)):
+                    chrom_weights[trial, pos] = randn(rng) * inv_sqrt_m
+        noise = None  # generated per-trial below
+    else:
+        # Fast vectorized numpy draws (default). Order: all weights, then noise.
+        gen = np.random.default_rng(int(seed) + 1)
+        for chrom in ops.chroms:
+            model_stats = ops.model_stats_for(chrom)
+            if not model_stats:
+                continue
+            m_c = len(model_stats)
+            weights_by_chrom[chrom] = (
+                gen.standard_normal((int(trials), m_c)) * inv_sqrt_m
+            )
+        noise = gen.standard_normal((int(trials), int(ops.n)))
 
     g_rand: List[Any] = []
     e_rand: List[Any] = []
@@ -101,15 +125,21 @@ def _generate_bolt_mc_components(
         ops.project_inplace(g)
         g_rand.append(g)
 
-    for _trial in range(int(trials)):
-        values = np.fromiter(
-            (randn(rng) for _ in range(int(ops.n))),
-            dtype=np.float64,
-            count=int(ops.n),
-        )
-        e = xp.asarray(values, dtype=DTYPE)
-        ops.project_inplace(e)
-        e_rand.append(e)
+    if rng_kind == "boost":
+        for _trial in range(int(trials)):
+            values = np.fromiter(
+                (randn(rng) for _ in range(int(ops.n))),
+                dtype=np.float64,
+                count=int(ops.n),
+            )
+            e = xp.asarray(values, dtype=DTYPE)
+            ops.project_inplace(e)
+            e_rand.append(e)
+    else:
+        for trial in range(int(trials)):
+            e = xp.asarray(noise[trial], dtype=DTYPE)
+            ops.project_inplace(e)
+            e_rand.append(e)
 
     y_dev = ops.project(xp.asarray(np.asarray(y, dtype=DTYPE).copy()))
     return g_rand, e_rand, y_dev
@@ -214,9 +244,12 @@ def fit_bolt_variance_components(
     rel_tol: float,
     max_iter: int,
     stats: CgStats,
+    rng_kind: str = "numpy",
 ) -> VarianceFit:
     trials = max(2, int(mc_trials))
-    g_rand, e_rand, y_dev = _generate_bolt_mc_components(ops, y, trials=trials, seed=int(seed))
+    g_rand, e_rand, y_dev = _generate_bolt_mc_components(
+        ops, y, trials=trials, seed=int(seed), rng_kind=rng_kind
+    )
 
     def evaluate(log_delta: float) -> McScalingResult:
         return _compute_mc_scaling(
@@ -246,6 +279,8 @@ def fit_bolt_variance_components(
         if (not best_accepts_secant) or abs(cur.f_reml) < abs(best.f_reml):
             best = cur
             best_accepts_secant = True
+
+    logger.debug("Secant variance search complete")
 
     delta = math.exp(float(best.log_delta))
     sigma_g2 = float(best.sigma2_k)
@@ -519,6 +554,7 @@ def bolt_lmm_inf(
     max_iter: int = DEFAULT_MAX_ITERS,
     seed: int = BOLT_RANDOM_SEED,
     threads: int = 1,
+    rng_kind: str = "numpy",
 ) -> Tuple[VarianceFit, CalibrationResult, Dict, pd.DataFrame]:
     """
     Run BOLT-LMM-inf on one or more chromosomes.
@@ -526,19 +562,26 @@ def bolt_lmm_inf(
     :param chrom_grgs: List of (chromosome_label, GRGCalcInterface), one per chromosome.
     :param y: Phenotype vector of length n_individuals.
     :param covariates: Orthonormal covariate basis (includes intercept).
+    :param rng_kind: RNG for MC variance-component probes: "numpy" (fast, default)
+        or "boost" (slower, bit-matches the BOLT-LMM reference).
     :returns: (VarianceFit, CalibrationResult, residuals_dict, results_dataframe)
     """
     cg_stats = CgStats()
 
     # Compute per-variant stats for each chromosome
     chrom_all_stats: List[List[BoltVariantStats]] = []
-    for chrom, grg in chrom_grgs:
-        #TODO: parallelilize this
-        stats = compute_bolt_variant_stats(grg, covariates, grg.num_individuals)
+    grgs = [grg for _, grg in chrom_grgs]
+    # TODO: check if CPU computations are non-trivial for multi-gpu
+    scheduler = _wrap_grg(chrom_grgs[0][1]).make_scheduler(grgs, threads)
+    futures = [scheduler.submit(grg, compute_bolt_variant_stats, grg, covariates, grg.num_individuals) for _, grg in chrom_grgs]
+    for future in futures:
+        stats = future.result()
         chrom_all_stats.append(stats)
+    logger.debug("Variant statistics complete")
 
     # Build ops
     ops = BoltLmmOps(chrom_grgs, chrom_all_stats, covariates, threads=threads).setup()
+    logger.debug("BoltLmmOps setup complete")
 
     # Fit variance components (variance fitting CG uses 10x looser tolerance,
     # matching grg-spmv convention — secant search is insensitive to CG precision)
@@ -546,10 +589,12 @@ def bolt_lmm_inf(
         ops, y,
         mc_trials=mc_trials,
         seed=seed,
+        rng_kind=rng_kind,
         rel_tol=10.0 * cg_tol,
         max_iter=max_iter,
         stats=cg_stats,
     )
+    logger.debug("Variance component fitting complete")
 
     # LOCO + calibration
     residuals: Dict[Any, Any] = {}
@@ -562,10 +607,15 @@ def bolt_lmm_inf(
         max_iter=max_iter,
         stats=cg_stats,
     )
+    logger.debug("LOCO calibration complete")
 
-    # Compute association statistics
-    results_df = compute_lmm_inf_results(
+    # Compute association statistics (fast numeric stats, then annotate)
+    stats = compute_lmm_inf_stats(
         ops, chrom_grgs, chrom_all_stats, y, residuals, fit, calibration
     )
+    logger.debug("Association statistics computation complete")
+
+    results_df = lmm_inf_stats_to_dataframe(stats, chrom_grgs)
+    logger.debug("Association results conversion complete")
 
     return fit, calibration, residuals, results_df

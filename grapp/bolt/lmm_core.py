@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import re
 from collections.abc import Sequence
@@ -38,6 +39,8 @@ BOOST_NORMAL_HEADER = Path("/usr/include/boost/random/normal_distribution.hpp")
 BOOST_EXPONENTIAL_HEADER = Path("/usr/include/boost/random/exponential_distribution.hpp")
 
 _UP = pygrgl.TraversalDirection.UP
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +108,25 @@ class McScalingResult:
     @property
     def f_reml(self) -> float:
         return float(self.f_jacks[-1])
+
+
+@dataclass(frozen=True)
+class BoltChromInfStats:
+    """Per-chromosome BOLT-LMM-inf numeric stats as parallel arrays (all variants).
+
+    Aligned 1:1 with ``all_stats`` order. Non-model variants carry placeholder
+    values (``BOLT_BAD_SNP_STAT`` chi2, p=1.0, beta=0, se=nan). Contains no GRG
+    mutation metadata; use ``lmm_inf_stats_to_dataframe`` to annotate.
+    """
+    chrom: Any
+    local_idx: np.ndarray      # int64, in all_stats order (== compact score position)
+    a1freq: np.ndarray         # float64
+    chisq_linreg: np.ndarray
+    p_linreg: np.ndarray
+    beta: np.ndarray
+    se: np.ndarray
+    chisq_lmm_inf: np.ndarray
+    p_lmm_inf: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -549,6 +571,7 @@ class BoltLmmOps:
         active_freqs: List[np.ndarray] = []
         active_vars: List[np.ndarray] = []
 
+        # TODO: check if we need to parallel this
         for (chrom, grg), stats in zip(self._chrom_grgs, self._chrom_stats):
             model_stats = stats
             self._model_stats_by_chrom[chrom] = model_stats
@@ -777,7 +800,7 @@ def compute_bolt_variant_stats(
         init="xtx",
     )).squeeze().astype(np.float64)
 
-    #TODO: this is not good with missing data!
+    #TODO: this is not good with missing data?
 
     # mean_center_norm2 = sum_i (x_ij - mean_j)^2 (using n_eff for mean)
     mean_center_norm2 = sumsq_g - acount * diploid_mean
@@ -819,6 +842,7 @@ def compute_bolt_variant_stats(
             norm_scale=float(norm_scale[local_idx]),
             x_norm2=float(x_norm2[local_idx]),
         ))
+    logger.debug("Per-variant stats (chrom) complete")
     return result
 
 
@@ -826,7 +850,7 @@ def compute_bolt_variant_stats(
 # Test-statistic output
 # ---------------------------------------------------------------------------
 
-def compute_lmm_inf_results(
+def compute_lmm_inf_stats(
     ops: BoltLmmOps,
     chrom_grgs: List[Tuple[Any, GRGCalcInterface]],
     chrom_all_stats: List[List[BoltVariantStats]],
@@ -834,84 +858,129 @@ def compute_lmm_inf_results(
     residuals: Dict[Any, Any],
     fit: VarianceFit,
     calibration: CalibrationResult,
-) -> pd.DataFrame:
+) -> List[BoltChromInfStats]:
     """
-    Compute per-variant BOLT-LMM-inf and linear-regression statistics.
+    Compute per-variant BOLT-LMM-inf and linear-regression statistics (fast path).
 
-    Returns a DataFrame with the standard BOLT-LMM output columns. Reuses
-    ``ops.scores(chrom, v)`` (compact model-variant scores) — non-model
-    variants get fixed placeholder stats, so they never need a real score.
+    Returns one ``BoltChromInfStats`` per chromosome, holding the numeric stats
+    as vectorized numpy arrays in ``all_stats`` order (all variants; non-model
+    variants carry placeholder values). Contains everything derivable from
+    ``BoltLmmOps`` and ``BoltVariantStats`` without any per-variant
+    ``get_mutation_by_id`` lookup. Use ``lmm_inf_stats_to_dataframe`` to attach
+    GRG mutation metadata and produce the standard BOLT-LMM DataFrame.
+
     Backend-correct: the operator dispatch inside ``ops.scores`` follows
-    ``ops._is_gpu``.
+    ``ops._is_cupy``.
     """
     y_dev = ops.project(ops.xp.asarray(np.asarray(y, dtype=DTYPE).copy()))
     y_norm2 = _dot(y_dev, y_dev)
     if y_norm2 <= 0.0:
         raise RuntimeError("phenotype has nonpositive projected norm")
 
-    rows = []
+    results: List[BoltChromInfStats] = []
     for (chrom, grg), all_stats in zip(chrom_grgs, chrom_all_stats):
         vinv_scale = float(calibration.vinv_scale_by_chrom[chrom])
         if vinv_scale <= 0.0:
             raise RuntimeError(f"nonpositive VinvScaleFactor for chr{chrom}: {vinv_scale}")
 
-        # Compact (model-variant-only) scores via the existing per-chrom op.
-        # ops.scores internally projects; passing already-projected vectors is
-        # safe because the orthogonal projection is idempotent.
-        linreg_scores_compact = ops.scores(chrom, y_dev)
-        lmm_scores_compact    = ops.scores(chrom, residuals[chrom])
+        # Compact scores via the existing per-chrom op. ops.scores internally
+        # projects; passing already-projected vectors is safe because the
+        # orthogonal projection is idempotent. Arrays are full-length and
+        # aligned 1:1 with all_stats order (== compact score position).
+        linreg_scores = ops.scores(chrom, y_dev)
+        lmm_scores    = ops.scores(chrom, residuals[chrom])
 
-        xp_s = _array_module(linreg_scores_compact)
+        xp_s = _array_module(linreg_scores)
         if hasattr(xp_s, "asnumpy"):
-            linreg_scores_compact = xp_s.asnumpy(linreg_scores_compact)
-            lmm_scores_compact    = xp_s.asnumpy(lmm_scores_compact)
+            linreg_scores = xp_s.asnumpy(linreg_scores)
+            lmm_scores    = xp_s.asnumpy(lmm_scores)
         else:
-            linreg_scores_compact = np.asarray(linreg_scores_compact)
-            lmm_scores_compact    = np.asarray(lmm_scores_compact)
+            linreg_scores = np.asarray(linreg_scores)
+            lmm_scores    = np.asarray(lmm_scores)
 
-        pos_by_local = ops._local_idx_to_pos[chrom]
         freqs_full = _to_np(allele_frequencies_cupy(grg)) if ops._is_cupy else allele_frequencies(grg)
 
-        for stat in all_stats:
-            local_idx = stat.local_idx
+        # Vectorized per-variant arrays in all_stats order.
+        local_idx = np.fromiter((s.local_idx for s in all_stats), dtype=np.int64, count=len(all_stats))
+        ns  = np.fromiter((s.norm_scale for s in all_stats), dtype=np.float64, count=len(all_stats))
+        pn2 = np.fromiter((s.proj_norm2 for s in all_stats), dtype=np.float64, count=len(all_stats))
+        xn2 = np.fromiter((s.x_norm2 for s in all_stats), dtype=np.float64, count=len(all_stats))
+        mcn2 = np.fromiter((s.mean_center_norm2 for s in all_stats), dtype=np.float64, count=len(all_stats))
+
+        # Same predicate as BoltVariantStats.is_model_variant, vectorized.
+        model_mask = (mcn2 > 0.0) & (pn2 >= 0.1) & (ns > 0.0) & (xn2 > 0.0)
+
+        a1freq = freqs_full[local_idx].astype(np.float64)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            linreg_chi2 = (linreg_scores * linreg_scores) / y_norm2 / xn2 * float(ops.dim)
+
+            vinv_score_raw = (lmm_scores / ns) / float(fit.sigma_g2)
+            lmm_chi2 = ((vinv_score_raw / vinv_scale) ** 2) / pn2
+            beta     = vinv_score_raw / (pn2 * vinv_scale * vinv_scale)
+            se       = 1.0 / (np.sqrt(pn2) * vinv_scale)
+
+        linreg_p = _scipy_chi2.sf(linreg_chi2, df=1)
+        lmm_p    = _scipy_chi2.sf(lmm_chi2, df=1)
+
+        # Placeholders for non-model variants (match scalar version).
+        bad = BOLT_BAD_SNP_STAT
+        linreg_chi2 = np.where(model_mask, linreg_chi2, bad)
+        lmm_chi2    = np.where(model_mask, lmm_chi2, bad)
+        linreg_p    = np.where(model_mask, linreg_p, 1.0)
+        lmm_p       = np.where(model_mask, lmm_p, 1.0)
+        beta        = np.where(model_mask, beta, 0.0)
+        se          = np.where(model_mask, se, np.nan)
+
+        results.append(BoltChromInfStats(
+            chrom=chrom,
+            local_idx=local_idx,
+            a1freq=a1freq,
+            chisq_linreg=np.ascontiguousarray(linreg_chi2, dtype=np.float64),
+            p_linreg=np.ascontiguousarray(linreg_p, dtype=np.float64),
+            beta=np.ascontiguousarray(beta, dtype=np.float64),
+            se=np.ascontiguousarray(se, dtype=np.float64),
+            chisq_lmm_inf=np.ascontiguousarray(lmm_chi2, dtype=np.float64),
+            p_lmm_inf=np.ascontiguousarray(lmm_p, dtype=np.float64),
+        ))
+
+    return results
+
+
+def lmm_inf_stats_to_dataframe(
+    chrom_stats: List[BoltChromInfStats],
+    chrom_grgs: List[Tuple[Any, GRGCalcInterface]],
+) -> pd.DataFrame:
+    """
+    Convert fast ``BoltChromInfStats`` into the standard BOLT-LMM output DataFrame.
+
+    This is the optional, slower step: it performs the per-variant
+    ``grg.get_mutation_by_id`` metadata lookups to build ``SNP_ID``, ``BP``,
+    ``ALLELE1``, ``ALLELE0`` and assembles the canonical columns.
+    """
+    grg_by_chrom = {chrom: grg for chrom, grg in chrom_grgs}
+
+    frames: List[pd.DataFrame] = []
+    for cs in chrom_stats:
+        chrom = cs.chrom
+        grg = grg_by_chrom[chrom]
+
+        bp, allele1, allele0, snp_id = [], [], [], []
+        for local_idx in cs.local_idx.tolist():
             mut = grg.get_mutation_by_id(local_idx)
-            snp_id = f"{chrom}:{mut.position}:{mut.allele}:{mut.ref_allele}"
-            a1freq = float(freqs_full[local_idx])
+            bp.append(mut.position)
+            allele1.append(mut.allele)
+            allele0.append(mut.ref_allele)
+            snp_id.append(f"{chrom}:{mut.position}:{mut.allele}:{mut.ref_allele}")
 
-            if not stat.is_model_variant:
-                rows.append({
-                    "SNP_ID": snp_id, "CHROM": chrom, "BP": mut.position,
-                    "ALLELE1": mut.allele, "ALLELE0": mut.ref_allele, "A1FREQ": a1freq,
-                    "CHISQ_LINREG": BOLT_BAD_SNP_STAT, "P_LINREG": 1.0,
-                    "BETA": 0.0, "SE": float("nan"),
-                    "CHISQ_BOLT_LMM_INF": BOLT_BAD_SNP_STAT, "P_BOLT_LMM_INF": 1.0,
-                })
-                continue
+        frames.append(pd.DataFrame({
+            "SNP_ID": snp_id, "CHROM": chrom, "BP": bp,
+            "ALLELE1": allele1, "ALLELE0": allele0, "A1FREQ": cs.a1freq,
+            "CHISQ_LINREG": cs.chisq_linreg, "P_LINREG": cs.p_linreg,
+            "BETA": cs.beta, "SE": cs.se,
+            "CHISQ_BOLT_LMM_INF": cs.chisq_lmm_inf, "P_BOLT_LMM_INF": cs.p_lmm_inf,
+        }))
 
-            pos = pos_by_local[local_idx]
-            linreg_score = float(linreg_scores_compact[pos])
-            lmm_score    = float(lmm_scores_compact[pos])
-
-            ns  = float(stat.norm_scale)
-            pn2 = float(stat.proj_norm2)
-            xn2 = float(stat.x_norm2)
-
-            linreg_chi2 = (linreg_score * linreg_score) / y_norm2 / xn2 * float(ops.dim)
-            linreg_p    = float(_scipy_chi2.sf(linreg_chi2, df=1))
-
-            h_score_raw    = lmm_score / ns
-            vinv_score_raw = h_score_raw / float(fit.sigma_g2)
-            lmm_chi2       = ((vinv_score_raw / vinv_scale) ** 2) / pn2
-            beta           = vinv_score_raw / (pn2 * vinv_scale * vinv_scale)
-            se             = 1.0 / (math.sqrt(pn2) * vinv_scale)
-            lmm_p          = float(_scipy_chi2.sf(lmm_chi2, df=1))
-
-            rows.append({
-                "SNP_ID": snp_id, "CHROM": chrom, "BP": mut.position,
-                "ALLELE1": mut.allele, "ALLELE0": mut.ref_allele, "A1FREQ": a1freq,
-                "CHISQ_LINREG": linreg_chi2, "P_LINREG": linreg_p,
-                "BETA": beta, "SE": se,
-                "CHISQ_BOLT_LMM_INF": lmm_chi2, "P_BOLT_LMM_INF": lmm_p,
-            })
-
-    return pd.DataFrame(rows)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
