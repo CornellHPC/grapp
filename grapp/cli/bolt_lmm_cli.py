@@ -59,7 +59,8 @@ def add_options(subparser):
         "--mc-trials",
         type=int,
         default=3,
-        help="Number of MC trials for variance component estimation (default: 3).",
+        help="Number of MC trials for variance component estimation (default: 3; "
+             "0 = BOLT auto-size max(min(4e9/N^2, 15), 3)).",
     )
     subparser.add_argument(
         "--cg-tol",

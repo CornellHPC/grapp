@@ -38,7 +38,7 @@ DTYPE = np.dtype(np.float64)
 BOLT_RANDOM_SEED = 12345
 BOLT_BAD_SNP_STAT = -1e9
 DEFAULT_NUM_CALIB_SNPS = 30
-DEFAULT_H2_EST_MC_TRIALS = 3
+DEFAULT_H2_EST_MC_TRIALS = 0
 DEFAULT_CG_TOL = 5e-4
 DEFAULT_MAX_ITERS = 10_000
 BOOST_NORMAL_HEADER = Path("/usr/include/boost/random/normal_distribution.hpp")
@@ -984,7 +984,12 @@ def fit_bolt_variance_components(
     rng_kind: str = "numpy",
     batched_apply_x: bool = False,
 ) -> VarianceFit:
-    trials = max(2, int(mc_trials))
+    if int(mc_trials) <= 0:
+        # BOLT default (setMCtrials, Bolt.cpp:2128-2137): auto-size from N.
+        trials = max(min(int(4e9 / ops.n / ops.n), 15), 3)
+        logger.debug("Using default number of MC trials: %d (for N = %d)", trials, ops.n)
+    else:
+        trials = max(2, int(mc_trials))
     g_rand, e_rand, y_dev = _generate_bolt_mc_components(
         ops, y, trials=trials, seed=int(seed), rng_kind=rng_kind,
         batched_apply_x=batched_apply_x,
@@ -1005,20 +1010,29 @@ def fit_bolt_variance_components(
     if abs(prev.f_reml) < abs(cur.f_reml):
         prev, cur = cur, prev
 
-    best_accepts_secant = False
+    # Mirror BOLT (Bolt.cpp:2179): clear bestVCs.fJacks so `best` must be re-adopted
+    # from a secant iterate, while keeping best.log_delta for the exit check.
+    best_is_empty = True
+    converged = False
     for _step in range(5):
         if abs(cur.f_reml - prev.f_reml) < 1e-300:
             break
         next_log_delta = (prev.log_delta * cur.f_reml - cur.log_delta * prev.f_reml) / (cur.f_reml - prev.f_reml)
         next_log_delta = float(np.clip(next_log_delta, -10.0, 10.0))
-        if (not best_accepts_secant) and best.log_delta == cur.log_delta and abs(next_log_delta - cur.log_delta) < 0.01:
+        # Exit when the current point is the best found and the step is tiny
+        # (Bolt.cpp:2213-2218).
+        if best.log_delta == cur.log_delta and abs(next_log_delta - cur.log_delta) < 0.01:
+            converged = True
             break
         prev = cur
         cur = evaluate(next_log_delta)
-        if (not best_accepts_secant) or abs(cur.f_reml) < abs(best.f_reml):
+        # updateBestMCscalingF (Bolt.cpp:2010): adopt while empty or strictly better.
+        if best_is_empty or abs(cur.f_reml) < abs(best.f_reml):
             best = cur
-            best_accepts_secant = True
+            best_is_empty = False
 
+    if not converged:
+        logger.warning("Secant iteration for h2 estimation may not have converged")
     logger.debug("Secant variance search complete")
 
     delta = math.exp(float(best.log_delta))
