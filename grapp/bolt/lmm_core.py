@@ -433,12 +433,19 @@ def bolt_conj_grad_solve(
     stats: Optional[CgStats] = None,
     project,
 ) -> List[Any]:
-    """Mirrors BOLT-LMM_v2.5 Bolt::conjGradSolve."""
+    """Mirrors BOLT-LMM_v2.5 Bolt::conjGradSolve.
+
+    The full CG iteration runs natively on the array backend of the inputs (CuPy
+    when device arrays are passed in, NumPy otherwise); the GRG operator
+    (``matvec`` = apply_k) and ``project`` operate on the same backend.
+    """
     if len(matvecs) != len(rhs_columns):
         raise ValueError("matvec and RHS counts differ")
     if not rhs_columns:
         return []
     xp = _array_module(rhs_columns[0])
+    # Mirrors BOLT-LMM_v2.5 Bolt::conjGradSolve: full-batch CG, no active-column
+    # mask, no denominator guard, and no exception when maxIters is reached.
     b_cols = [project(xp.asarray(rhs, dtype=DTYPE).copy()) for rhs in rhs_columns]
     b = xp.column_stack(b_cols)
     x = xp.zeros_like(b)
@@ -458,7 +465,7 @@ def bolt_conj_grad_solve(
         r = project(r)
         r2_new = xp.sum(r * r, axis=0)
         rels = xp.sqrt(r2_new / r2_orig)
-        if not bool(_as_float(xp.any(rels > float(rel_tol)))):
+        if not bool(xp.any(rels > float(rel_tol))):
             if stats is not None:
                 rel_values = xp.asnumpy(rels) if hasattr(xp, "asnumpy") else np.asarray(rels)
                 for rel in rel_values:
@@ -696,7 +703,11 @@ class BoltLmmOps:
         """project(X @ w) for model variants of this chromosome."""
         with self._device_ctx(chrom):
             w_dev = self._xp.asarray(w, dtype=DTYPE)
-        result = self._x_ops[chrom].matvec(w_dev)
+            result = self._x_ops[chrom].matvec(w_dev)
+        if self._is_cupy:
+            # TODO: projection should be done on the same device as grg if possible
+            from grapp.linalg.ops_cupy import _xdev_asarray
+            result = _xdev_asarray(result)
         return self._covariates.project_device(result)
 
     def apply_x_all(self, weights) -> Any:

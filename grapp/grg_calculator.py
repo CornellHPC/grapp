@@ -115,6 +115,14 @@ class GRGSeqSched(GRGScheduler):
     def submit(self, grg: GRGCalcInterface, operation, *args, **kwargs) -> GRGWaitable:
         return GRGSeqOp(operation(*args, **kwargs))
 
+    # No-op gate API so operators that drive a gated scheduler (e.g.
+    # MultiCuPyStdXXTOperator) also work under fully sequential execution.
+    def reset(self) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
 
 class GRGThreadOp(GRGWaitable):
     def __init__(self, future: concurrent.futures.Future):

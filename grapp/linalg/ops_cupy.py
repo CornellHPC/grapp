@@ -98,6 +98,7 @@ def _xdev_copy(dst, src) -> None:
                 xp.cuda.get_current_stream().synchronize()
         with cuda.Device(dst.device):
             dst[:] = src
+            xp.cuda.get_current_stream().synchronize()
 
 
 def _xdev_asarray(src):
@@ -117,6 +118,11 @@ def _xdev_asarray(src):
         # contiguous on its own device first, then do the D2D copy.
         with cuda.Device(dev):
             src = xp.ascontiguousarray(src)
+            # Sync the source stream before the cross-device read: no implicit
+            # ordering exists between separate device streams, so the producing
+            # kernels (and the ascontiguousarray kernel) must complete before the
+            # peer copy reads src. Mirrors _xdev_copy's source-side sync.
+            xp.cuda.get_current_stream().synchronize()
         return xp.array(src)  # explicit D2D copy to current device
     return xp.asarray(src)
 
@@ -277,9 +283,10 @@ class CuPyXOperator(LinearOperator):
                         )
                     kwargs["miss"] = M
 
-                result = self.grg.matmul(
-                    A, mult_dir, by_individual=not self.haploid, **kwargs
-                )
+                with cuda.Device(self._device):
+                    result = self.grg.matmul(
+                        A, mult_dir, by_individual=not self.haploid, **kwargs
+                    )
 
                 if mult_dir == _UP and use_M:
                     result += M * self.miss_values
@@ -303,13 +310,13 @@ class CuPyXOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -345,13 +352,13 @@ class CuPyXTXOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -392,13 +399,13 @@ class CuPyXXTOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -514,32 +521,40 @@ class CuPyStdXOperator(_CuPyStandardizedOperator):
                         )
 
                     with _nvtx("StdX_matmul"):
-                        XvS = self.grg.matmul(
-                            vS, mult_dir, by_individual=not self.haploid
-                        )
+                        with cuda.Device(self._device):
+                            XvS = self.grg.matmul(
+                                vS, mult_dir, by_individual=not self.haploid
+                            )
+                            xp.cuda.get_current_stream().synchronize()
 
                     with _nvtx("StdX_post"):
-                        consts = xp.sum(
-                            self.mult_const * self.freqs * vS, axis=1, keepdims=True
-                        )
-                        result = self.filter.adjust_output(XvS - consts, mult_dir).T
+                        with cuda.Device(self._device):
+                            consts = xp.sum(
+                                self.mult_const * self.freqs * vS, axis=1, keepdims=True
+                            )
+                            result = self.filter.adjust_output(XvS - consts, mult_dir).T
 
                 else:  # DOWN
                     with _nvtx("StdX_prep"):
                         m = self.filter.prep_input(other_matrix.T, mult_dir)
 
                     with _nvtx("StdX_matmul"):
-                        SXv = (
-                            self.grg.matmul(m, mult_dir, by_individual=not self.haploid)
-                            * self.inverse_sigma
-                        )
+                        # See UP branch: re-assert self._device around the native
+                        # matmul so the post-matmul math stays on the right device.
+                        with cuda.Device(self._device):
+                            SXv_raw = self.grg.matmul(
+                                m, mult_dir, by_individual=not self.haploid
+                            )
+                            xp.cuda.get_current_stream().synchronize()
+                            SXv = SXv_raw * self.inverse_sigma
 
                     with _nvtx("StdX_post"):
-                        col_const = xp.sum(m.T, axis=0, keepdims=True).T
-                        sub_const2 = (
-                            self.mult_const * self.freqs * self.inverse_sigma
-                        ) * col_const
-                        result = self.filter.adjust_output(SXv - sub_const2, mult_dir).T
+                        with cuda.Device(self._device):
+                            col_const = xp.sum(m.T, axis=0, keepdims=True).T
+                            sub_const2 = (
+                                self.mult_const * self.freqs * self.inverse_sigma
+                            ) * col_const
+                            result = self.filter.adjust_output(SXv - sub_const2, mult_dir).T
 
                 if out is not None:
                     # Sync self._device stream; queue copy on out.device's null stream.
@@ -558,13 +573,13 @@ class CuPyStdXOperator(_CuPyStandardizedOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -605,13 +620,13 @@ class CuPyStdXTXOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -657,13 +672,13 @@ class CuPyStdXXTOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -764,10 +779,12 @@ class MultiCuPyXOperator(LinearOperator):
                         sub = _xdev_asarray(sub)
                     futures.append(self.scheduler.submit(op.grg, op_method, op, sub, part))
                     start = end
+                returned_parts = []
                 for f in futures:
-                    f.result()
+                    returned_parts.append(f.result())
                 with cuda.Device(self._output_device):
-                    result = sum(parts[1:], parts[0])
+                    xp.cuda.get_current_stream().synchronize()
+                    result = sum(returned_parts[1:], returned_parts[0])
                     # Sync so that sum kernels complete before any cross-device read of result.
                     xp.cuda.get_current_stream().synchronize()
                 return result
@@ -811,13 +828,13 @@ class MultiCuPyXOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -860,13 +877,13 @@ class MultiCuPyXTXOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -947,13 +964,13 @@ class MultiCuPyXXTOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -1076,13 +1093,13 @@ class MultiCuPyStdXOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -1129,13 +1146,13 @@ class MultiCuPyStdXTXOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
 
@@ -1228,13 +1245,13 @@ class MultiCuPyStdXXTOperator(LinearOperator):
     def _matvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._matmat(vect)
 
     def _rmatvec(self, vect):
         if vect.ndim != 2:
             with cuda.Device(self._output_device):
-                vect = xp.asarray([vect]).T
+                vect = _xdev_asarray(vect).reshape(-1, 1)
         return self._rmatmat(vect)
 
     def matvec_loco(self, v, *, exclude_op_idx: Optional[int] = None):
