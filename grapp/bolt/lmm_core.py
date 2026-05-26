@@ -50,6 +50,33 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# NVTX helper
+# ---------------------------------------------------------------------------
+
+try:  # CuPy is optional; NVTX ranges no-op on the NumPy backend.
+    from cupy.cuda import nvtx as _cuda_nvtx  # type: ignore
+except Exception:  # pragma: no cover - depends on runtime CUDA availability
+    _cuda_nvtx = None
+
+
+@contextlib.contextmanager
+def _nvtx(name: str):
+    """Push/pop an NVTX range (no-op if CuPy/CUDA is unavailable).
+
+    Ranges use a ``bolt:`` prefix and ``:``-delimited level naming so the
+    Nsight timeline reads stage -> sub-step -> inner op.
+    """
+    if _cuda_nvtx is None:
+        yield
+        return
+    _cuda_nvtx.RangePush(name)
+    try:
+        yield
+    finally:
+        _cuda_nvtx.RangePop()
+
+
+# ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
 
@@ -864,14 +891,15 @@ def _generate_bolt_mc_components(
     ordered_w = [weights_by_chrom[chrom].T for chrom in ops.chroms if chrom in weights_by_chrom]
     W = np.concatenate(ordered_w, axis=0)  # (m_proj, trials)
 
-    if batched_apply_x:
-        G = ops.apply_x_all(W)              # (n, trials), projected
-        g_rand: List[Any] = [G[:, t].copy() for t in range(int(trials))]
-    else:
-        g_rand = []
-        for t in range(int(trials)):
-            g = ops.apply_x_all(W[:, t:t + 1])  # (n, 1), projected
-            g_rand.append(g[:, 0].copy())
+    with _nvtx("bolt:mc_gen:apply_x"):
+        if batched_apply_x:
+            G = ops.apply_x_all(W)              # (n, trials), projected
+            g_rand: List[Any] = [G[:, t].copy() for t in range(int(trials))]
+        else:
+            g_rand = []
+            for t in range(int(trials)):
+                g = ops.apply_x_all(W[:, t:t + 1])  # (n, 1), projected
+                g_rand.append(g[:, 0].copy())
 
     if rng_kind == "boost":
         for _trial in range(int(trials)):
@@ -919,28 +947,32 @@ def _compute_mc_scaling(
     rand_beta: List[float] = []
     rand_eps: List[float] = []
 
-    rhs_columns = []
-    for g_t, e_t in zip(g_rand, e_rand):
-        rhs = e_t * sqrt_delta + g_t
-        ops.project_inplace(rhs)
-        rhs_columns.append(rhs)
-    rhs_columns.append(y_dev)
+    with _nvtx("bolt:mc:rhs_build"):
+        rhs_columns = []
+        for g_t, e_t in zip(g_rand, e_rand):
+            rhs = e_t * sqrt_delta + g_t
+            ops.project_inplace(rhs)
+            rhs_columns.append(rhs)
+        rhs_columns.append(y_dev)
 
-    z_columns = bolt_conj_grad_solve(
-        [h_into for _ in rhs_columns],
-        rhs_columns,
-        rel_tol=rel_tol,
-        max_iter=max_iter,
-        stats=stats,
-        project=ops.project,
-    )
-    for z_t in z_columns[:-1]:
-        rand_beta.append(_sum_score_squares(ops, z_t))
-        rand_eps.append(_dot(z_t, z_t))
+    with _nvtx("bolt:mc:cg_solve"):
+        z_columns = bolt_conj_grad_solve(
+            [h_into for _ in rhs_columns],
+            rhs_columns,
+            rel_tol=rel_tol,
+            max_iter=max_iter,
+            stats=stats,
+            project=ops.project,
+        )
 
-    z_data = z_columns[-1]
-    data_beta = _sum_score_squares(ops, z_data)
-    data_eps = _dot(z_data, z_data)
+    with _nvtx("bolt:mc:reductions"):
+        for z_t in z_columns[:-1]:
+            rand_beta.append(_sum_score_squares(ops, z_t))
+            rand_eps.append(_dot(z_t, z_t))
+
+        z_data = z_columns[-1]
+        data_beta = _sum_score_squares(ops, z_data)
+        data_eps = _dot(z_data, z_data)
 
     if min([data_beta, data_eps, *rand_beta, *rand_eps]) <= 0.0:
         raise RuntimeError("invalid BOLT MC-scaling objective component")
@@ -1001,46 +1033,49 @@ def fit_bolt_variance_components(
         logger.debug("Using default number of MC trials: %d (for N = %d)", trials, ops.n)
     else:
         trials = max(2, int(mc_trials))
-    g_rand, e_rand, y_dev = _generate_bolt_mc_components(
-        ops, y, trials=trials, seed=int(seed), rng_kind=rng_kind,
-        batched_apply_x=batched_apply_x,
-    )
-
-    def evaluate(log_delta: float) -> McScalingResult:
-        return _compute_mc_scaling(
-            ops, y_dev, g_rand, e_rand,
-            log_delta=float(log_delta),
-            rel_tol=rel_tol,
-            max_iter=max_iter,
-            stats=stats,
+    with _nvtx("bolt:vc:mc_components"):
+        g_rand, e_rand, y_dev = _generate_bolt_mc_components(
+            ops, y, trials=trials, seed=int(seed), rng_kind=rng_kind,
+            batched_apply_x=batched_apply_x,
         )
 
-    prev = evaluate(log_delta_from_h2(ops, 0.25))
-    cur = evaluate(log_delta_from_h2(ops, 0.125 if prev.f_reml < 0.0 else 0.5))
-    best = prev if abs(prev.f_reml) <= abs(cur.f_reml) else cur
-    if abs(prev.f_reml) < abs(cur.f_reml):
-        prev, cur = cur, prev
+    def evaluate(log_delta: float) -> McScalingResult:
+        with _nvtx("bolt:vc:eval"):
+            return _compute_mc_scaling(
+                ops, y_dev, g_rand, e_rand,
+                log_delta=float(log_delta),
+                rel_tol=rel_tol,
+                max_iter=max_iter,
+                stats=stats,
+            )
 
-    # Mirror BOLT (Bolt.cpp:2179): clear bestVCs.fJacks so `best` must be re-adopted
-    # from a secant iterate, while keeping best.log_delta for the exit check.
-    best_is_empty = True
-    converged = False
-    for _step in range(5):
-        if abs(cur.f_reml - prev.f_reml) < 1e-300:
-            break
-        next_log_delta = (prev.log_delta * cur.f_reml - cur.log_delta * prev.f_reml) / (cur.f_reml - prev.f_reml)
-        next_log_delta = float(np.clip(next_log_delta, -10.0, 10.0))
-        # Exit when the current point is the best found and the step is tiny
-        # (Bolt.cpp:2213-2218).
-        if best.log_delta == cur.log_delta and abs(next_log_delta - cur.log_delta) < 0.01:
-            converged = True
-            break
-        prev = cur
-        cur = evaluate(next_log_delta)
-        # updateBestMCscalingF (Bolt.cpp:2010): adopt while empty or strictly better.
-        if best_is_empty or abs(cur.f_reml) < abs(best.f_reml):
-            best = cur
-            best_is_empty = False
+    with _nvtx("bolt:vc:secant"):
+        prev = evaluate(log_delta_from_h2(ops, 0.25))
+        cur = evaluate(log_delta_from_h2(ops, 0.125 if prev.f_reml < 0.0 else 0.5))
+        best = prev if abs(prev.f_reml) <= abs(cur.f_reml) else cur
+        if abs(prev.f_reml) < abs(cur.f_reml):
+            prev, cur = cur, prev
+
+        # Mirror BOLT (Bolt.cpp:2179): clear bestVCs.fJacks so `best` must be re-adopted
+        # from a secant iterate, while keeping best.log_delta for the exit check.
+        best_is_empty = True
+        converged = False
+        for _step in range(5):
+            if abs(cur.f_reml - prev.f_reml) < 1e-300:
+                break
+            next_log_delta = (prev.log_delta * cur.f_reml - cur.log_delta * prev.f_reml) / (cur.f_reml - prev.f_reml)
+            next_log_delta = float(np.clip(next_log_delta, -10.0, 10.0))
+            # Exit when the current point is the best found and the step is tiny
+            # (Bolt.cpp:2213-2218).
+            if best.log_delta == cur.log_delta and abs(next_log_delta - cur.log_delta) < 0.01:
+                converged = True
+                break
+            prev = cur
+            cur = evaluate(next_log_delta)
+            # updateBestMCscalingF (Bolt.cpp:2010): adopt while empty or strictly better.
+            if best_is_empty or abs(cur.f_reml) < abs(best.f_reml):
+                best = cur
+                best_is_empty = False
 
     if not converged:
         logger.warning("Secant iteration for h2 estimation may not have converged")
@@ -1085,11 +1120,12 @@ def solve_loco_hinv_y(
 
         matvecs.append(h_into)
         rhs_columns.append(y_dev)
-    solved = bolt_conj_grad_solve(
-        matvecs, rhs_columns,
-        rel_tol=rel_tol, max_iter=max_iter, stats=stats,
-        project=ops.project,
-    )
+    with _nvtx("bolt:loco:cg_solve"):
+        solved = bolt_conj_grad_solve(
+            matvecs, rhs_columns,
+            rel_tol=rel_tol, max_iter=max_iter, stats=stats,
+            project=ops.project,
+        )
     return {chrom: value for chrom, value in zip(chroms, solved)}
 
 
@@ -1188,7 +1224,8 @@ def calibrate_lmm_inf(
     max_iter: int,
     stats: CgStats,
 ) -> CalibrationResult:
-    selected, tried = select_bolt_calibration_snps(ops, fit=fit, count=int(count), seed=int(seed))
+    with _nvtx("bolt:calib:select_snps"):
+        selected, tried = select_bolt_calibration_snps(ops, fit=fit, count=int(count), seed=int(seed))
     pro_stats: List[float] = []
     retro_stats: List[float] = []
     ratios: List[float] = []
@@ -1209,22 +1246,24 @@ def calibrate_lmm_inf(
         rhs_columns.append(y_dev)
 
     selected_columns = []
-    for sel_chrom, sel_stat in selected:
-        x = ops.column(sel_chrom, sel_stat.local_idx)
+    with _nvtx("bolt:calib:columns"):
+        for sel_chrom, sel_stat in selected:
+            x = ops.column(sel_chrom, sel_stat.local_idx)
 
-        def h_into(src, dst, left_out=sel_chrom) -> None:
-            result = ops.apply_k(src, exclude_chrom=left_out)
-            dst[...] = result + float(fit.delta) * src
+            def h_into(src, dst, left_out=sel_chrom) -> None:
+                result = ops.apply_k(src, exclude_chrom=left_out)
+                dst[...] = result + float(fit.delta) * src
 
-        matvecs.append(h_into)
-        rhs_columns.append(x)
-        selected_columns.append(x)
+            matvecs.append(h_into)
+            rhs_columns.append(x)
+            selected_columns.append(x)
 
-    solved_columns = bolt_conj_grad_solve(
-        matvecs, rhs_columns,
-        rel_tol=rel_tol, max_iter=max_iter, stats=stats,
-        project=ops.project,
-    )
+    with _nvtx("bolt:calib:cg_solve"):
+        solved_columns = bolt_conj_grad_solve(
+            matvecs, rhs_columns,
+            rel_tol=rel_tol, max_iter=max_iter, stats=stats,
+            project=ops.project,
+        )
 
     residuals.clear()
     for chrom, solved in zip(chroms, solved_columns[: len(chroms)]):
@@ -1236,28 +1275,29 @@ def calibrate_lmm_inf(
     }
     x_by_sel = {i: x for i, x in enumerate(selected_columns)}
 
-    h_norm2 = {chrom: _dot(value, value) for chrom, value in residuals.items()}
-    phi_h_phi = {chrom: _dot(y_dev, value) for chrom, value in residuals.items()}
+    with _nvtx("bolt:calib:moments"):
+        h_norm2 = {chrom: _dot(value, value) for chrom, value in residuals.items()}
+        phi_h_phi = {chrom: _dot(y_dev, value) for chrom, value in residuals.items()}
 
-    for i, (sel_chrom, sel_stat) in enumerate(selected):
-        x = x_by_sel[i]
-        score_h = _dot(x, residuals[sel_chrom])
-        x_norm2 = _dot(x, x)
-        if h_norm2[sel_chrom] <= 0.0 or phi_h_phi[sel_chrom] <= 0.0:
-            raise RuntimeError(f"invalid LOCO H^-1 y moments for chr{sel_chrom}")
-        if x_norm2 <= 0.0:
-            raise RuntimeError(f"selected calibration SNP has nonpositive projected norm: {sel_stat.local_idx}")
-        retro = n_minus_c * score_h * score_h / (h_norm2[sel_chrom] * x_norm2)
-        if retro <= 0.0:
-            raise RuntimeError(f"selected calibration SNP has nonpositive retrospective stat: {sel_stat.local_idx}")
-        q = q_by_sel[i]
-        denom_h = _dot(x, q)
-        if denom_h <= 0.0:
-            raise RuntimeError(f"selected calibration SNP has nonpositive prospective denominator: {sel_stat.local_idx}")
-        pro = n_minus_c * score_h * score_h / denom_h / phi_h_phi[sel_chrom]
-        pro_stats.append(float(pro))
-        retro_stats.append(float(retro))
-        ratios.append(float(pro / retro))
+        for i, (sel_chrom, sel_stat) in enumerate(selected):
+            x = x_by_sel[i]
+            score_h = _dot(x, residuals[sel_chrom])
+            x_norm2 = _dot(x, x)
+            if h_norm2[sel_chrom] <= 0.0 or phi_h_phi[sel_chrom] <= 0.0:
+                raise RuntimeError(f"invalid LOCO H^-1 y moments for chr{sel_chrom}")
+            if x_norm2 <= 0.0:
+                raise RuntimeError(f"selected calibration SNP has nonpositive projected norm: {sel_stat.local_idx}")
+            retro = n_minus_c * score_h * score_h / (h_norm2[sel_chrom] * x_norm2)
+            if retro <= 0.0:
+                raise RuntimeError(f"selected calibration SNP has nonpositive retrospective stat: {sel_stat.local_idx}")
+            q = q_by_sel[i]
+            denom_h = _dot(x, q)
+            if denom_h <= 0.0:
+                raise RuntimeError(f"selected calibration SNP has nonpositive prospective denominator: {sel_stat.local_idx}")
+            pro = n_minus_c * score_h * score_h / denom_h / phi_h_phi[sel_chrom]
+            pro_stats.append(float(pro))
+            retro_stats.append(float(retro))
+            ratios.append(float(pro / retro))
 
     total_pro = float(sum(pro_stats))
     total_retro = float(sum(retro_stats))
@@ -1464,6 +1504,7 @@ def compute_lmm_inf_stats(
 
     results: List[BoltChromInfStats] = []
     for (chrom, grg), all_stats in zip(chrom_grgs, chrom_all_stats):
+      with _nvtx("bolt:assoc:chrom"):
         vinv_scale = float(calibration.vinv_scale_by_chrom[chrom])
         if vinv_scale <= 0.0:
             raise RuntimeError(f"nonpositive VinvScaleFactor for chr{chrom}: {vinv_scale}")

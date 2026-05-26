@@ -141,6 +141,12 @@ class GRGThreadSched(GRGScheduler):
         # scheduling may need to do custom swapping of the grg in/out of memory.
         assert isinstance(grg, GRGCalcInterface)
         return GRGThreadOp(self.executor.submit(operation, *args, **kwargs))
+    
+    def reset(self):
+        pass
+
+    def start(self):
+        pass
 
 
 class GRGHybridSched(GRGScheduler):
@@ -341,6 +347,9 @@ class GRGSpMVCalculator(GRGCalcInterface):
         return result
 
     def make_scheduler(self, grgs: List["GRGCalcInterface"], workers: int = 1, gated: bool = False):
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        return GRGThreadSched(executor)
+    
         if workers > 1:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
             return GRGHybridSched(executor, lambda grg: grg.device if hasattr(grg, "device") else None, gated=gated)

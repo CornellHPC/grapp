@@ -33,6 +33,7 @@ from grapp.bolt.lmm_core import (
     compute_lmm_inf_stats,
     detect_cupy_backend,
     fit_bolt_variance_components,
+    _nvtx,
 )
 
 
@@ -123,50 +124,55 @@ def bolt_lmm_inf(
 
     # Compute per-variant stats for each chromosome
     chrom_all_stats: List[List[BoltVariantStats]] = []
-    grgs = [grg for _, grg in chrom_grgs]
-    scheduler = _wrap_grg(chrom_grgs[0][1]).make_scheduler(grgs, threads)
-    futures = [scheduler.submit(grg, compute_bolt_variant_stats, grg, covariates, grg.num_individuals, use_cupy) for _, grg in chrom_grgs]
-    for future in futures:
-        stats = future.result()
-        chrom_all_stats.append(stats)
+    with _nvtx("bolt:variant_stats"):
+        grgs = [grg for _, grg in chrom_grgs]
+        scheduler = _wrap_grg(chrom_grgs[0][1]).make_scheduler(grgs, threads)
+        futures = [scheduler.submit(grg, compute_bolt_variant_stats, grg, covariates, grg.num_individuals, use_cupy) for _, grg in chrom_grgs]
+        for future in futures:
+            stats = future.result()
+            chrom_all_stats.append(stats)
     logger.debug("Variant statistics complete")
 
     # Build ops
-    ops = BoltLmmOps(chrom_grgs, chrom_all_stats, covariates, threads=threads, use_cupy=use_cupy).setup()
+    with _nvtx("bolt:ops_setup"):
+        ops = BoltLmmOps(chrom_grgs, chrom_all_stats, covariates, threads=threads, use_cupy=use_cupy).setup()
     logger.debug("BoltLmmOps setup complete")
 
     # Fit variance components (variance fitting CG uses 10x looser tolerance,
     # matching grg-spmv convention — secant search is insensitive to CG precision)
-    fit = fit_bolt_variance_components(
-        ops, y,
-        mc_trials=mc_trials,
-        seed=seed,
-        rng_kind=rng_kind,
-        batched_apply_x=batched_apply_x,
-        rel_tol=10.0 * cg_tol,
-        max_iter=max_iter,
-        stats=cg_stats,
-    )
+    with _nvtx("bolt:variance_fit"):
+        fit = fit_bolt_variance_components(
+            ops, y,
+            mc_trials=mc_trials,
+            seed=seed,
+            rng_kind=rng_kind,
+            batched_apply_x=batched_apply_x,
+            rel_tol=10.0 * cg_tol,
+            max_iter=max_iter,
+            stats=cg_stats,
+        )
     logger.debug("Variance component fitting complete")
 
     # LOCO + calibration
     residuals: Dict[Any, Any] = {}
-    calibration = calibrate_lmm_inf(
-        ops, y, residuals,
-        fit=fit,
-        count=num_calib_snps,
-        seed=seed,
-        rel_tol=cg_tol,
-        max_iter=max_iter,
-        stats=cg_stats,
-    )
+    with _nvtx("bolt:calibration"):
+        calibration = calibrate_lmm_inf(
+            ops, y, residuals,
+            fit=fit,
+            count=num_calib_snps,
+            seed=seed,
+            rel_tol=cg_tol,
+            max_iter=max_iter,
+            stats=cg_stats,
+        )
     logger.debug("LOCO calibration complete")
 
     # Compute association statistics (fast numeric path; caller converts to a
     # DataFrame via lmm_inf_stats_to_dataframe when annotated output is wanted).
-    stats = compute_lmm_inf_stats(
-        ops, chrom_grgs, chrom_all_stats, y, residuals, fit, calibration
-    )
+    with _nvtx("bolt:assoc_stats"):
+        stats = compute_lmm_inf_stats(
+            ops, chrom_grgs, chrom_all_stats, y, residuals, fit, calibration
+        )
     logger.debug("Association statistics computation complete")
 
     return fit, calibration, residuals, stats
