@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from scipy.stats import chi2 as _scipy_chi2
+from scipy.special import erfc as _erfc
 
 import pygrgl
 
@@ -533,6 +534,94 @@ class BoltVariantStats:
         )
 
 
+class BoltVariantStatsArray(Sequence):
+    """Struct-of-arrays counterpart of ``List[BoltVariantStats]``.
+
+    Holds parallel host-numpy arrays (one row per variant, in ``local_idx``
+    order). Hot-path code reads whole arrays via the field properties; cold-path
+    code that needs per-element ``BoltVariantStats`` objects uses
+    ``__getitem__``/``__iter__``. Returned arrays are read-only by convention
+    (consumers never mutate them in place).
+    """
+
+    __slots__ = ("_local_idx", "_mean", "_mean_center_norm2",
+                 "_proj_norm2", "_norm_scale", "_x_norm2")
+
+    def __init__(self, local_idx, mean, mean_center_norm2,
+                 proj_norm2, norm_scale, x_norm2):
+        n = len(local_idx)
+        self._local_idx         = np.ascontiguousarray(local_idx, dtype=np.int64)
+        self._mean              = np.ascontiguousarray(mean, dtype=np.float64)
+        self._mean_center_norm2 = np.ascontiguousarray(mean_center_norm2, dtype=np.float64)
+        self._proj_norm2        = np.ascontiguousarray(proj_norm2, dtype=np.float64)
+        self._norm_scale        = np.ascontiguousarray(norm_scale, dtype=np.float64)
+        self._x_norm2           = np.ascontiguousarray(x_norm2, dtype=np.float64)
+        for name, arr in (("mean", self._mean),
+                          ("mean_center_norm2", self._mean_center_norm2),
+                          ("proj_norm2", self._proj_norm2),
+                          ("norm_scale", self._norm_scale),
+                          ("x_norm2", self._x_norm2)):
+            if arr.shape != (n,):
+                raise ValueError(
+                    f"BoltVariantStatsArray.{name} shape {arr.shape} != ({n},)"
+                )
+
+    # whole-array accessors (names match the BoltVariantStats fields)
+    @property
+    def local_idx(self) -> np.ndarray:
+        return self._local_idx
+
+    @property
+    def mean(self) -> np.ndarray:
+        return self._mean
+
+    @property
+    def mean_center_norm2(self) -> np.ndarray:
+        return self._mean_center_norm2
+
+    @property
+    def proj_norm2(self) -> np.ndarray:
+        return self._proj_norm2
+
+    @property
+    def norm_scale(self) -> np.ndarray:
+        return self._norm_scale
+
+    @property
+    def x_norm2(self) -> np.ndarray:
+        return self._x_norm2
+
+    @property
+    def is_model_variant_mask(self) -> np.ndarray:
+        # Vectorized mirror of BoltVariantStats.is_model_variant — keep in sync.
+        return (
+            (self._mean_center_norm2 > 0.0)
+            & (self._proj_norm2 >= 0.1)
+            & (self._norm_scale > 0.0)
+            & (self._x_norm2 > 0.0)
+        )
+
+    def __len__(self) -> int:
+        return int(self._local_idx.shape[0])
+
+    def __getitem__(self, i) -> BoltVariantStats:
+        # int index -> a real frozen BoltVariantStats (slices unsupported; no
+        # call site needs them).
+        i = int(i)
+        return BoltVariantStats(
+            local_idx=int(self._local_idx[i]),
+            mean=float(self._mean[i]),
+            mean_center_norm2=float(self._mean_center_norm2[i]),
+            proj_norm2=float(self._proj_norm2[i]),
+            norm_scale=float(self._norm_scale[i]),
+            x_norm2=float(self._x_norm2[i]),
+        )
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+
 # ---------------------------------------------------------------------------
 # BoltLmmOps
 # ---------------------------------------------------------------------------
@@ -550,7 +639,7 @@ class BoltLmmOps:
     def __init__(
         self,
         chrom_grgs: List[Tuple[Any, GRGCalcInterface]],
-        chrom_stats: List[List[BoltVariantStats]],
+        chrom_stats: List[BoltVariantStatsArray],
         covariates: CovariateBasis,
         threads: int = 1,
         use_cupy: Optional[bool] = None,
@@ -572,7 +661,7 @@ class BoltLmmOps:
         self._k_all_op: Any = None
         self._x_all_op: Any = None
         self._chrom_to_op_idx: Dict[Any, int] = {}
-        self._model_stats_by_chrom: Dict[Any, List[BoltVariantStats]] = {}
+        self._model_stats_by_chrom: Dict[Any, BoltVariantStatsArray] = {}
         self._local_idx_to_pos: Dict[Any, Dict[int, int]] = {}
         self._is_cupy: bool = False
         self._xp = np
@@ -603,14 +692,15 @@ class BoltLmmOps:
         for (chrom, grg), stats in zip(self._chrom_grgs, self._chrom_stats):
             model_stats = stats
             self._model_stats_by_chrom[chrom] = model_stats
+            li = model_stats.local_idx
             self._local_idx_to_pos[chrom] = {
-                s.local_idx: pos for pos, s in enumerate(model_stats)
+                int(li[pos]): pos for pos in range(len(li))
             }
 
             if not model_stats:
                 continue
 
-            mcn2 = np.array([s.mean_center_norm2 for s in model_stats], dtype=np.float64)
+            mcn2 = model_stats.mean_center_norm2
             var_c = mcn2 / float(self._n - 1)
 
             freqs_c = allele_frequencies_cupy(grg) if self._is_cupy else allele_frequencies(grg)
@@ -618,7 +708,7 @@ class BoltLmmOps:
             m_c = len(model_stats)
             self._m_proj += m_c
             self._m_proj_by_chrom[chrom] = m_c
-            self._xfro2 += float(sum(s.x_norm2 for s in model_stats))
+            self._xfro2 += float(model_stats.x_norm2.sum())
 
             if self._is_cupy:
                 from grapp.linalg.ops_cupy import CuPyStdXOperator
@@ -797,7 +887,9 @@ class BoltLmmOps:
     # Accessor for stats
     # ------------------------------------------------------------------
 
-    def model_stats_for(self, chrom) -> List[BoltVariantStats]:
+    def model_stats_for(self, chrom):
+        # Returns a BoltVariantStatsArray, or [] for an absent chrom (the empty
+        # list still satisfies the len/truthiness/iterate uses at call sites).
         return self._model_stats_by_chrom.get(chrom, [])
 
     def all_model_stats(self) -> List[Tuple[Any, BoltVariantStats]]:
@@ -1144,10 +1236,28 @@ def select_bolt_calibration_snps(
     if num_calib < 2:
         raise ValueError("at least two calibration SNPs are required")
 
-    ordered = ops.all_model_stats()  # List[(chrom, BoltVariantStats)]
-    model_count = len(ordered)
+    # Flat index over all model stats in chrom order, WITHOUT materializing a
+    # BoltVariantStats per variant (all_model_stats would construct millions of
+    # objects). Each segment is (chrom, flat_start, stats_array); we map a flat
+    # index m -> (chrom, j) by a linear scan over the (few) chrom segments.
+    segments: List[Tuple[Any, int, "BoltVariantStatsArray"]] = []
+    offset = 0
+    for chrom, _ in ops._chrom_grgs:
+        arr = ops._model_stats_by_chrom.get(chrom, [])
+        n_c = len(arr)
+        if n_c == 0:
+            continue
+        segments.append((chrom, offset, arr))
+        offset += n_c
+    model_count = offset
     if model_count <= 0:
         raise ValueError("no eligible SNPs available for calibration")
+
+    def _locate(m: int) -> Tuple[Any, "BoltVariantStatsArray", int]:
+        for seg_chrom, seg_start, seg_arr in segments:
+            if m < seg_start + len(seg_arr):
+                return seg_chrom, seg_arr, m - seg_start
+        raise IndexError(m)
     if num_calib > model_count:
         raise ValueError(
             f"requested {num_calib} calibration SNPs but only {model_count} model SNPs are available"
@@ -1195,15 +1305,16 @@ def select_bolt_calibration_snps(
             if attempts > 1_000_000:
                 raise RuntimeError(f"could not select a calibration SNP from block {block}")
             m = block_start + boost_uniform_int_0_2pow30(rng) % block_width
-            chrom, stat = ordered[m]
+            chrom, arr, j = _locate(m)
             tried += 1
             # position within this chrom's compact score array
-            pos = ops._local_idx_to_pos[chrom][stat.local_idx]
+            pos = ops._local_idx_to_pos[chrom][int(arr.local_idx[j])]
             grammar_score = float(grammar_scores_by_chrom[chrom][pos])
-            x_norm2 = float(stat.x_norm2)
+            x_norm2 = float(arr.x_norm2[j])
             retro_stat = (grammar_score ** 2) / all_hinv_norm2 / x_norm2 * float(ops.dim)
             if retro_stat < 5.0:
-                selected.append((chrom, stat))
+                # Build the per-variant object only for the selected SNP.
+                selected.append((chrom, arr[j]))
                 break
     return selected, tried
 
@@ -1352,7 +1463,7 @@ def compute_bolt_variant_stats(
     covariates: CovariateBasis,
     n_individuals: int,
     use_cupy: Optional[bool] = None,
-) -> List[BoltVariantStats]:
+) -> BoltVariantStatsArray:
     """
     Compute BOLT-LMM-inf per-variant statistics from a GRG.
 
@@ -1436,16 +1547,14 @@ def compute_bolt_variant_stats(
     proj_norm2 = np.maximum(0.0, mean_center_norm2 - sum_sq_proj)
     x_norm2 = proj_norm2 * norm_scale * norm_scale
 
-    result = []
-    for local_idx in range(grg.num_mutations):
-        result.append(BoltVariantStats(
-            local_idx=local_idx,
-            mean=float(diploid_mean[local_idx]),
-            mean_center_norm2=float(mean_center_norm2[local_idx]),
-            proj_norm2=float(proj_norm2[local_idx]),
-            norm_scale=float(norm_scale[local_idx]),
-            x_norm2=float(x_norm2[local_idx]),
-        ))
+    result = BoltVariantStatsArray(
+        local_idx=np.arange(grg.num_mutations, dtype=np.int64),
+        mean=diploid_mean,
+        mean_center_norm2=mean_center_norm2,
+        proj_norm2=proj_norm2,
+        norm_scale=norm_scale,
+        x_norm2=x_norm2,
+    )
     logger.debug("Per-variant stats (chrom) complete")
     return result
 
@@ -1453,6 +1562,24 @@ def compute_bolt_variant_stats(
 # ---------------------------------------------------------------------------
 # Association statistics (fast numeric path)
 # ---------------------------------------------------------------------------
+
+DEFAULT_PVALUE_METHOD = "erfc"  # df=1 chi-square survival via closed form
+
+
+def _chi2_sf_df1(x: np.ndarray, method: str = DEFAULT_PVALUE_METHOD) -> np.ndarray:
+    """Survival function of a chi-square with 1 dof, vectorized.
+
+    method="erfc" (default): exact closed form sf(x) = erfc(sqrt(x/2)); ~46x
+        faster than scipy.stats.chi2.sf(x, df=1) and equal to ~1e-15. Inputs
+        here are always >= 0 (squared scores over positive norms).
+    method="scipy": scipy.stats.chi2.sf(x, df=1) (reference / slow).
+    """
+    if method == "erfc":
+        return _erfc(np.sqrt(x * 0.5))
+    if method == "scipy":
+        return _scipy_chi2.sf(x, df=1)
+    raise ValueError(f"unknown pvalue_method {method!r}")
+
 
 @dataclass(frozen=True)
 class BoltChromInfStats:
@@ -1477,11 +1604,12 @@ class BoltChromInfStats:
 def compute_lmm_inf_stats(
     ops: BoltLmmOps,
     chrom_grgs: List[Tuple[Any, GRGCalcInterface]],
-    chrom_all_stats: List[List[BoltVariantStats]],
+    chrom_all_stats: List[BoltVariantStatsArray],
     y,
     residuals: Dict[Any, Any],
     fit: VarianceFit,
     calibration: CalibrationResult,
+    pvalue_method: str = DEFAULT_PVALUE_METHOD,
 ) -> List[BoltChromInfStats]:
     """
     Compute per-variant BOLT-LMM-inf and linear-regression statistics (fast path).
@@ -1526,15 +1654,15 @@ def compute_lmm_inf_stats(
 
         freqs_full = _to_np(allele_frequencies_cupy(grg)) if ops._is_cupy else allele_frequencies(grg)
 
-        # Vectorized per-variant arrays in all_stats order.
-        local_idx = np.fromiter((s.local_idx for s in all_stats), dtype=np.int64, count=len(all_stats))
-        ns  = np.fromiter((s.norm_scale for s in all_stats), dtype=np.float64, count=len(all_stats))
-        pn2 = np.fromiter((s.proj_norm2 for s in all_stats), dtype=np.float64, count=len(all_stats))
-        xn2 = np.fromiter((s.x_norm2 for s in all_stats), dtype=np.float64, count=len(all_stats))
-        mcn2 = np.fromiter((s.mean_center_norm2 for s in all_stats), dtype=np.float64, count=len(all_stats))
+        # Per-variant arrays in all_stats order. These are read-only views into
+        # the BoltVariantStatsArray; downstream arithmetic allocates new arrays
+        # (never mutates these in place).
+        local_idx = all_stats.local_idx
+        ns   = all_stats.norm_scale
+        pn2  = all_stats.proj_norm2
+        xn2  = all_stats.x_norm2
 
-        # Same predicate as BoltVariantStats.is_model_variant, vectorized.
-        model_mask = (mcn2 > 0.0) & (pn2 >= 0.1) & (ns > 0.0) & (xn2 > 0.0)
+        model_mask = all_stats.is_model_variant_mask
 
         a1freq = freqs_full[local_idx].astype(np.float64)
 
@@ -1546,8 +1674,8 @@ def compute_lmm_inf_stats(
             beta     = vinv_score_raw / (pn2 * vinv_scale * vinv_scale)
             se       = 1.0 / (np.sqrt(pn2) * vinv_scale)
 
-        linreg_p = _scipy_chi2.sf(linreg_chi2, df=1)
-        lmm_p    = _scipy_chi2.sf(lmm_chi2, df=1)
+        linreg_p = _chi2_sf_df1(linreg_chi2, pvalue_method)
+        lmm_p    = _chi2_sf_df1(lmm_chi2, pvalue_method)
 
         # Placeholders for non-model variants (match scalar version).
         bad = BOLT_BAD_SNP_STAT

@@ -21,8 +21,10 @@ from grapp.bolt.lmm_core import (
     DEFAULT_H2_EST_MC_TRIALS,
     DEFAULT_CG_TOL,
     DEFAULT_MAX_ITERS,
+    DEFAULT_PVALUE_METHOD,
     BoltChromInfStats,
     BoltVariantStats,
+    BoltVariantStatsArray,
     BoltLmmOps,
     CalibrationResult,
     CgStats,
@@ -100,6 +102,7 @@ def bolt_lmm_inf(
     threads: int = 1,
     rng_kind: str = "numpy",
     batched_apply_x: bool = False,
+    pvalue_method: str = DEFAULT_PVALUE_METHOD,
 ) -> Tuple[VarianceFit, CalibrationResult, Dict, List[BoltChromInfStats]]:
     """
     Run BOLT-LMM-inf on one or more chromosomes.
@@ -123,7 +126,7 @@ def bolt_lmm_inf(
     use_cupy = detect_cupy_backend(chrom_grgs[0][1])
 
     # Compute per-variant stats for each chromosome
-    chrom_all_stats: List[List[BoltVariantStats]] = []
+    chrom_all_stats: List[BoltVariantStatsArray] = []
     with _nvtx("bolt:variant_stats"):
         grgs = [grg for _, grg in chrom_grgs]
         scheduler = _wrap_grg(chrom_grgs[0][1]).make_scheduler(grgs, threads)
@@ -171,7 +174,8 @@ def bolt_lmm_inf(
     # DataFrame via lmm_inf_stats_to_dataframe when annotated output is wanted).
     with _nvtx("bolt:assoc_stats"):
         stats = compute_lmm_inf_stats(
-            ops, chrom_grgs, chrom_all_stats, y, residuals, fit, calibration
+            ops, chrom_grgs, chrom_all_stats, y, residuals, fit, calibration,
+            pvalue_method=pvalue_method,
         )
     logger.debug("Association statistics computation complete")
 
