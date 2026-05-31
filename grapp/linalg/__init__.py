@@ -294,6 +294,7 @@ def PCs(
     use_cupy: bool = False,
     init_vector: Optional[numpy.typing.NDArray] = None,
     tol: float = 0,
+    include_eig_val: bool = False
 ):
     """
     Get the principal components for each sample corresponding to the first :math:`k` eigenvectors from a GRG.
@@ -367,4 +368,6 @@ def PCs(
     df.index.name = "Individual"
     if include_eig:
         return df, eigen_values, eigen_vectors
+    if include_eig_val:
+        return df, eigen_values
     return df

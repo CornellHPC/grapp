@@ -343,7 +343,7 @@ class GRGSpMVCalculator(GRGCalcInterface):
             init=init,
             miss=miss,
         )
-        logger.info("SpMV matmul done: result=%s", result.shape)
+        logger.debug("SpMV matmul done: result=%s", result.shape)
         return result
 
     def make_scheduler(self, grgs: List["GRGCalcInterface"], workers: int = 1, gated: bool = False):

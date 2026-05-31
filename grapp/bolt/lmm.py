@@ -9,6 +9,7 @@ metadata lookups) plus the ``bolt_lmm_inf`` orchestrator.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -35,6 +36,7 @@ from grapp.bolt.lmm_core import (
     compute_lmm_inf_stats,
     detect_cupy_backend,
     fit_bolt_variance_components,
+    summarize_chisq,
     _nvtx,
 )
 
@@ -122,11 +124,18 @@ def bolt_lmm_inf(
     """
     cg_stats = CgStats()
 
+    _y_arr = np.asarray(y, dtype=np.float64)
+    logger.info(
+        "Phenotype: N=%d mean=%.6g std=%.6g",
+        _y_arr.size, float(_y_arr.mean()), float(_y_arr.std()),
+    )
+
     # Detect the CuPy/NumPy backend once and pass it to every consumer.
     use_cupy = detect_cupy_backend(chrom_grgs[0][1])
 
     # Compute per-variant stats for each chromosome
     chrom_all_stats: List[BoltVariantStatsArray] = []
+    t0 = time.perf_counter()
     with _nvtx("bolt:variant_stats"):
         grgs = [grg for _, grg in chrom_grgs]
         scheduler = _wrap_grg(chrom_grgs[0][1]).make_scheduler(grgs, threads)
@@ -134,15 +143,24 @@ def bolt_lmm_inf(
         for future in futures:
             stats = future.result()
             chrom_all_stats.append(stats)
-    logger.debug("Variant statistics complete")
+    logger.info("Time for computing variant statistics = %.2f sec", time.perf_counter() - t0)
 
     # Build ops
+    t0 = time.perf_counter()
     with _nvtx("bolt:ops_setup"):
         ops = BoltLmmOps(chrom_grgs, chrom_all_stats, covariates, threads=threads, use_cupy=use_cupy).setup()
-    logger.debug("BoltLmmOps setup complete")
+    logger.info(
+        "Individuals N=%d, model SNPs M=%d across %d chroms", ops.n, ops.m_proj, len(ops.chroms),
+    )
+    logger.info(
+        "Model SNPs per chrom: %s",
+        ", ".join(f"{chrom}:{ops.m_proj_by_chrom.get(chrom, 0)}" for chrom in ops.chroms),
+    )
+    logger.info("Time for BoltLmmOps setup = %.2f sec", time.perf_counter() - t0)
 
     # Fit variance components (variance fitting CG uses 10x looser tolerance,
     # matching grg-spmv convention — secant search is insensitive to CG precision)
+    t0 = time.perf_counter()
     with _nvtx("bolt:variance_fit"):
         fit = fit_bolt_variance_components(
             ops, y,
@@ -154,10 +172,11 @@ def bolt_lmm_inf(
             max_iter=max_iter,
             stats=cg_stats,
         )
-    logger.debug("Variance component fitting complete")
+    logger.info("Time for fitting variance components = %.2f sec", time.perf_counter() - t0)
 
     # LOCO + calibration
     residuals: Dict[Any, Any] = {}
+    t0 = time.perf_counter()
     with _nvtx("bolt:calibration"):
         calibration = calibrate_lmm_inf(
             ops, y, residuals,
@@ -168,15 +187,26 @@ def bolt_lmm_inf(
             max_iter=max_iter,
             stats=cg_stats,
         )
-    logger.debug("LOCO calibration complete")
+    logger.info("Time for LOCO calibration = %.2f sec", time.perf_counter() - t0)
 
     # Compute association statistics (fast numeric path; caller converts to a
     # DataFrame via lmm_inf_stats_to_dataframe when annotated output is wanted).
+    t0 = time.perf_counter()
     with _nvtx("bolt:assoc_stats"):
         stats = compute_lmm_inf_stats(
             ops, chrom_grgs, chrom_all_stats, y, residuals, fit, calibration,
             pvalue_method=pvalue_method,
         )
-    logger.debug("Association statistics computation complete")
+    logger.info("Time for computing assoc stats = %.2f sec", time.perf_counter() - t0)
+
+    summary = summarize_chisq(stats)
+    logger.info(
+        "Mean LINREG: %.6g (%d good SNPs)   lambdaGC: %.6g",
+        summary["linreg"]["mean"], summary["linreg"]["n_good"], summary["linreg"]["lambda_gc"],
+    )
+    logger.info(
+        "Mean BOLT_LMM_INF: %.6g (%d good SNPs)   lambdaGC: %.6g",
+        summary["lmm_inf"]["mean"], summary["lmm_inf"]["n_good"], summary["lmm_inf"]["lambda_gc"],
+    )
 
     return fit, calibration, residuals, stats

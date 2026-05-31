@@ -779,6 +779,10 @@ class BoltLmmOps:
         return self._m_proj
 
     @property
+    def m_proj_by_chrom(self) -> Dict[Any, int]:
+        return dict(self._m_proj_by_chrom)
+
+    @property
     def xfro2(self) -> float:
         return self._xfro2
 
@@ -1122,9 +1126,10 @@ def fit_bolt_variance_components(
     if int(mc_trials) <= 0:
         # BOLT default (setMCtrials, Bolt.cpp:2128-2137): auto-size from N.
         trials = max(min(int(4e9 / ops.n / ops.n), 15), 3)
-        logger.debug("Using default number of MC trials: %d (for N = %d)", trials, ops.n)
+        logger.info("Using default number of MC trials: %d (for N = %d)", trials, ops.n)
     else:
         trials = max(2, int(mc_trials))
+    logger.info("Estimating variance parameters: %d MC trials, CGtol=%.3g", trials, rel_tol)
     with _nvtx("bolt:vc:mc_components"):
         g_rand, e_rand, y_dev = _generate_bolt_mc_components(
             ops, y, trials=trials, seed=int(seed), rng_kind=rng_kind,
@@ -1133,13 +1138,18 @@ def fit_bolt_variance_components(
 
     def evaluate(log_delta: float) -> McScalingResult:
         with _nvtx("bolt:vc:eval"):
-            return _compute_mc_scaling(
+            res = _compute_mc_scaling(
                 ops, y_dev, g_rand, e_rand,
                 log_delta=float(log_delta),
                 rel_tol=rel_tol,
                 max_iter=max_iter,
                 stats=stats,
             )
+        logger.info(
+            "MCscaling: logDelta=%.4f h2=%.4f f=%.6g",
+            res.log_delta, h2_from_log_delta(ops, res.log_delta), res.f_reml,
+        )
+        return res
 
     with _nvtx("bolt:vc:secant"):
         prev = evaluate(log_delta_from_h2(ops, 0.25))
@@ -1177,6 +1187,10 @@ def fit_bolt_variance_components(
     sigma_g2 = float(best.sigma2_k)
     sigma_e2 = delta * sigma_g2
     h2 = h2_from_log_delta(ops, best.log_delta)
+    logger.info(
+        "Estimated heritability h2g=%.4f; sigma_g2=%.6g logDelta=%.6f f=%.6g",
+        h2, sigma_g2, best.log_delta, best.f_reml,
+    )
     return VarianceFit(
         log_delta=float(best.log_delta),
         sigma_g2=sigma_g2,
@@ -1337,6 +1351,10 @@ def calibrate_lmm_inf(
 ) -> CalibrationResult:
     with _nvtx("bolt:calib:select_snps"):
         selected, tried = select_bolt_calibration_snps(ops, fit=fit, count=int(count), seed=int(seed))
+    logger.info(
+        "Selected %d calibration SNPs (tried %d, threw out %d)",
+        len(selected), int(tried), int(tried) - len(selected),
+    )
     pro_stats: List[float] = []
     retro_stats: List[float] = []
     ratios: List[float] = []
@@ -1415,6 +1433,7 @@ def calibrate_lmm_inf(
     if total_pro <= 0.0 or total_retro <= 0.0:
         raise RuntimeError("calibration failed: prospective or retrospective sum is nonpositive")
     factor = total_pro / total_retro
+    calibration_raw = factor
     calibration_jacks = [
         (total_pro - pro) / (total_retro - retro)
         for pro, retro in zip(pro_stats, retro_stats)
@@ -1442,6 +1461,14 @@ def calibrate_lmm_inf(
             raise RuntimeError(f"LOCO H^-1 y has nonpositive norm for chr{chrom}")
         resid_factor = math.sqrt(n_minus_c / resid_norm2 * factor)
         vinv_scale_by_chrom[chrom] = 1.0 / (resid_factor * float(fit.sigma_g2))
+
+    logger.info(
+        "AvgPro=%.3f AvgRetro=%.3f Calibration=%.3f (%.3f)  "
+        "RatioOfMedians=%.3f MedianOfRatios=%.3f (%d SNPs)",
+        float(np.mean(pro_stats)), float(np.mean(retro_stats)),
+        calibration_raw, calibration_std,
+        ratio_of_medians, median_of_ratios, len(pro_stats),
+    )
 
     return CalibrationResult(
         factor=float(factor),
@@ -1599,6 +1626,35 @@ class BoltChromInfStats:
     se: np.ndarray
     chisq_lmm_inf: np.ndarray
     p_lmm_inf: np.ndarray
+
+
+# chi-square 1-df median, used to normalize the genomic control factor lambdaGC.
+_CHI2_1DF_MEDIAN = 0.4549364231195732
+
+
+def summarize_chisq(stats: List["BoltChromInfStats"]) -> Dict[str, Dict[str, float]]:
+    """Mean chi-square and lambdaGC over good (model) SNPs, for LINREG and LMM-inf.
+
+    Concatenates the per-chromosome chi-square arrays, drops placeholder
+    (``BOLT_BAD_SNP_STAT``) entries carried by non-model variants, and returns
+    ``{"linreg": {...}, "lmm_inf": {...}}`` with ``mean``, ``lambda_gc`` and
+    ``n_good`` for each. One vectorized pass; cheap relative to the pipeline.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    for key, attr in (("linreg", "chisq_linreg"), ("lmm_inf", "chisq_lmm_inf")):
+        if stats:
+            chisq = np.concatenate([np.asarray(getattr(cs, attr)) for cs in stats])
+        else:
+            chisq = np.empty(0, dtype=np.float64)
+        good = chisq[chisq != BOLT_BAD_SNP_STAT]
+        if good.size:
+            mean = float(np.mean(good))
+            lambda_gc = float(np.median(good) / _CHI2_1DF_MEDIAN)
+        else:
+            mean = float("nan")
+            lambda_gc = float("nan")
+        out[key] = {"mean": mean, "lambda_gc": lambda_gc, "n_good": int(good.size)}
+    return out
 
 
 def compute_lmm_inf_stats(
