@@ -332,4 +332,4 @@ def PCs(
     df.index.name = "Individual"
     if include_eig:
         return df, eigen_values, eigen_vectors
-    return df
+    return df, eigen_values
