@@ -161,6 +161,10 @@ def get_eig_pcs(
     do_xtx: bool = False,
     init_vector: Optional[numpy.typing.NDArray] = None,
     tol: float = 0,
+    solver: str = "eigsh",
+    init_matrix: Optional[numpy.typing.NDArray] = None,
+    maxiter: Optional[int] = None,
+    random_seed: int = 42,
 ) -> Tuple[NDArray, NDArray, Optional[NDArray]]:
     """
     Get the principal components for each sample corresponding to the first :math:`k` eigenvectors from a GRG,
@@ -186,12 +190,30 @@ def get_eig_pcs(
     :type do_xtx: bool
     :param init_vector: Optional starting vector for the iterative solver, passed to eigsh as ``v0``.
     :type init_vector: Optional[numpy.typing.NDArray]
-    :param tol: Convergence tolerance for the iterative solver, passed to eigsh. 0 means machine
-        precision. Default: 0.
+    :param tol: Convergence tolerance for the iterative solver. For ``eigsh``, 0 means machine
+        precision; for ``lobpcg``, 0 is mapped to its default tolerance. Default: 0.
     :type tol: float
+    :param solver: Which iterative eigensolver to use: ``"eigsh"`` (default) or ``"lobpcg"``.
+        ``lobpcg`` ignores ``init_vector`` and uses ``init_matrix`` instead.
+    :type solver: str
+    :param init_matrix: Optional starting guess for ``lobpcg`` as an ``(op.shape[0], k)`` matrix
+        (the columns span the initial search subspace). ``op.shape[0]`` is the number of individuals
+        for the default ``XX^T`` path, or the number of variants when ``do_xtx=True``. If None, a
+        random Gaussian matrix seeded by ``random_seed`` is used. Ignored when ``solver="eigsh"``.
+    :type init_matrix: Optional[numpy.typing.NDArray]
+    :param maxiter: Maximum iterations for ``lobpcg``. None uses the solver default. Ignored when
+        ``solver="eigsh"``.
+    :type maxiter: Optional[int]
+    :param random_seed: Seed for the random ``init_matrix`` when ``solver="lobpcg"`` and no
+        ``init_matrix`` is supplied. Default: 42.
+    :type random_seed: int
     :return: A pair (PC_scores, eigen_values) where each is a numpy array.
     :rtype: Tuple[numpy.ndarray, numpy.ndarray, Optional[numpy.ndarray]]
     """
+    if solver not in ("eigsh", "lobpcg"):
+        raise ValueError(
+            f"Unknown solver {solver!r}. Expected 'eigsh' or 'lobpcg'."
+        )
     # Route everything through the backend-agnostic operator selector so this works for both the
     # NumPy (GRGCalculator) and CuPy (GRGSpMVCalculator) backends.
     grg_list = (
@@ -199,7 +221,6 @@ def get_eig_pcs(
     )
     repr_grg = grg_list[0]
 
-    eigsh_fn = repr_grg.get_operator("eigsh", standardized=True)
     op_name = "XTX" if do_xtx else "XXT"
 
     freqs: Union[List[numpy.typing.NDArray], numpy.typing.NDArray]
@@ -220,7 +241,19 @@ def get_eig_pcs(
         what = "variants" if do_xtx else "individuals"
         print(f"Running eigen decomposition on {op.shape[0]} {what}")
 
-    eigen_values, eigen_vectors = eigsh_fn(op, k=k, which="LM", v0=init_vector, tol=tol)
+    if solver == "lobpcg":
+        lobpcg_fn = repr_grg.get_operator("lobpcg", standardized=True)
+        if init_matrix is None:
+            rng = numpy.random.default_rng(random_seed)
+            init_matrix = rng.standard_normal((op.shape[0], k))
+        eigen_values, eigen_vectors = lobpcg_fn(
+            op, init_matrix, largest=True, tol=(tol or None), maxiter=maxiter
+        )
+    else:
+        eigsh_fn = repr_grg.get_operator("eigsh", standardized=True)
+        eigen_values, eigen_vectors = eigsh_fn(
+            op, k=k, which="LM", v0=init_vector, tol=tol
+        )
     sort_by_eigvalues(eigen_values, eigen_vectors)
     assert eigen_vectors.real.dtype == numpy.float64
     if not do_xtx:
@@ -262,6 +295,9 @@ def PCs(
     threads: int = 1,
     init_vector: Optional[numpy.typing.NDArray] = None,
     tol: float = 0,
+    solver: str = "eigsh",
+    init_matrix: Optional[numpy.typing.NDArray] = None,
+    maxiter: Optional[int] = None,
 ):
     """
     Get the principal components for each sample corresponding to the first :math:`k` eigenvectors from a GRG.
@@ -284,9 +320,19 @@ def PCs(
     :type threads: int
     :param init_vector: Optional starting vector for the iterative solver, passed to eigsh as ``v0``.
     :type init_vector: Optional[numpy.typing.NDArray]
-    :param tol: Convergence tolerance for the iterative solver, passed to eigsh. 0 means machine
-        precision. Default: 0.
+    :param tol: Convergence tolerance for the iterative solver. For ``eigsh``, 0 means machine
+        precision; for ``lobpcg``, 0 is mapped to its default tolerance. Default: 0.
     :type tol: float
+    :param solver: Which iterative eigensolver to use: ``"eigsh"`` (default) or ``"lobpcg"``.
+        Ignored when ``use_pro_pca=True``. ``lobpcg`` uses ``init_matrix`` (not ``init_vector``).
+    :type solver: str
+    :param init_matrix: Optional ``(n, k)`` starting subspace for ``lobpcg`` (``n`` = number of
+        individuals, or number of variants when ``include_eig=True``). If None, a random matrix is
+        used. Ignored when ``solver="eigsh"``.
+    :type init_matrix: Optional[numpy.typing.NDArray]
+    :param maxiter: Maximum iterations for ``lobpcg``. None uses the solver default. Ignored when
+        ``solver="eigsh"``.
+    :type maxiter: Optional[int]
     :return: A pandas.DataFrame with a row per individual and a column per principal component. Or, if include_eig
         then a triple (dataframe, eigen values, eigen vectors), where eigen vectors are None unless use_pro_pca
         was True.
@@ -325,6 +371,9 @@ def PCs(
             do_xtx=include_eig,
             init_vector=init_vector,
             tol=tol,
+            solver=solver,
+            init_matrix=init_matrix,
+            maxiter=maxiter,
         )
 
     colnames = [f"PC{i+1}" for i in range(PC_scores.shape[1])]

@@ -29,6 +29,7 @@ import numpy
 from grapp.grg_calculator import (
     GRGCalcInterface as _GRGCalcInterface,
     _wrap_grg,
+    _log_matmul,
 )
 
 # When True, cross-device copies are routed D2H + H2D instead of using
@@ -255,6 +256,10 @@ class CuPyXOperator(LinearOperator):
                     kwargs["miss"] = M
 
                 with cuda.Device(self._device):
+                    _log_matmul(
+                        "cupy", A, mult_dir, False, not self.haploid,
+                        None, kwargs.get("miss"),
+                    )
                     result = self.grg.get_raw().matmul(
                         A,
                         self.grg._convert_dir(mult_dir),
@@ -508,6 +513,10 @@ class CuPyStdXOperator(_CuPyStandardizedOperator):
 
                     with _nvtx("StdX_matmul"):
                         with cuda.Device(self._device):
+                            _log_matmul(
+                                "cupy", vS, mult_dir, False, not self.haploid,
+                                None, None,
+                            )
                             XvS = self.grg.get_raw().matmul(
                                 vS,
                                 self.grg._convert_dir(mult_dir),
@@ -530,6 +539,10 @@ class CuPyStdXOperator(_CuPyStandardizedOperator):
                         # See UP branch: re-assert self._device around the native
                         # matmul so the post-matmul math stays on the right device.
                         with cuda.Device(self._device):
+                            _log_matmul(
+                                "cupy", m, mult_dir, False, not self.haploid,
+                                None, None,
+                            )
                             SXv_raw = self.grg.get_raw().matmul(
                                 m,
                                 self.grg._convert_dir(mult_dir),

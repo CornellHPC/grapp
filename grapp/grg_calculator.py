@@ -1,11 +1,38 @@
 from abc import ABC, abstractmethod
 import functools
+import logging
 import pygrgl
 import numpy
 import threading
 import concurrent.futures
 import contextlib
 from typing import Optional, Union, Dict, Callable, List, Any
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _log_matmul(backend, input, direction, emit_all_nodes, by_individual, init, miss):
+    """Emit a DEBUG line describing a single matmul call (backend-agnostic).
+
+    Guarded by isEnabledFor so the (cheap) init-mode classification is skipped
+    entirely when DEBUG logging is off, since matmul is on the eigensolver hot path.
+    """
+    if not LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    if init is None:
+        init_mode = "none"
+    elif isinstance(init, str):
+        init_mode = init
+    elif getattr(init, "ndim", None) == 1:
+        init_mode = "vector"
+    else:
+        init_mode = "matrix"
+    LOGGER.debug(
+        "matmul[%s]: direction=%s by_individual=%s emit_all_nodes=%s init_mode=%s "
+        "use_miss=%s input_shape=%s",
+        backend, direction, by_individual, emit_all_nodes, init_mode,
+        miss is not None, tuple(getattr(input, "shape", ())),
+    )
 
 try:
     import pygrgl_spmv
@@ -26,7 +53,7 @@ def _scipy_operator_table() -> Dict[tuple, Callable]:
     # All interfaces take numpy arrays and return numpy arrays, conversion to/from cupy arrays
     # should be done internally!
     from grapp.linalg import ops_scipy as m
-    from scipy.sparse.linalg import eigsh
+    from scipy.sparse.linalg import eigsh, lobpcg
 
     return {
         ("X", False, False): m.SciPyXOperator,
@@ -46,6 +73,8 @@ def _scipy_operator_table() -> Dict[tuple, Callable]:
         ("XXT", True, True): m.MultiSciPyStdXXTOperator,
         ("EIGSH", False, False): eigsh,
         ("EIGSH", True, False): eigsh,
+        ("LOBPCG", False, False): lobpcg,
+        ("LOBPCG", True, False): lobpcg,
     }
 
 
@@ -54,16 +83,26 @@ def _cupy_operator_table() -> Dict[tuple, Callable]:
         cupy is not None
     ), "cupy not installed; try 'pip install cupy' or use a different backend"
     from grapp.linalg import ops_cupy as m
-    from cupyx.scipy.sparse.linalg import eigsh
+    from cupyx.scipy.sparse.linalg import eigsh, lobpcg
+
+    def _convert_if_present(kwargs, key):
+        if key in kwargs and kwargs[key] is not None:
+            kwargs[key] = cupy.asarray(kwargs[key])
 
     def _eigsh(A, **kwargs):
-        def _convert_if_present(kwargs, key):
-            if key in kwargs:
-                kwargs[key] = cupy.asarray(kwargs[key])
-
         _convert_if_present(kwargs, "M")
         _convert_if_present(kwargs, "v0")
         eigval, eigvect = eigsh(A, **kwargs)
+        cupy.cuda.Device().synchronize()
+        return cupy.asnumpy(eigval), cupy.asnumpy(eigvect)
+
+    def _lobpcg(A, X, **kwargs):
+        # LOBPCG takes the initial guess as a required (n, k) matrix X (second
+        # positional arg), plus optional M (preconditioner) / Y (constraints) matrices.
+        X = cupy.asarray(X)
+        _convert_if_present(kwargs, "M")
+        _convert_if_present(kwargs, "Y")
+        eigval, eigvect = lobpcg(A, X, **kwargs)
         cupy.cuda.Device().synchronize()
         return cupy.asnumpy(eigval), cupy.asnumpy(eigvect)
 
@@ -86,6 +125,8 @@ def _cupy_operator_table() -> Dict[tuple, Callable]:
         ("XXT", True, True): m.MultiCuPyStdXXTOperator,
         ("EIGSH", False, False): _eigsh,
         ("EIGSH", True, False): _eigsh,
+        ("LOBPCG", False, False): _lobpcg,
+        ("LOBPCG", True, False): _lobpcg,
     }
 
 
@@ -103,7 +144,7 @@ def _select_operator_cls(
 
     :param backend: ``"SciPy"`` or ``"CuPy"``.
     :param op: One of ``"X"``, ``"XT"``, ``"XTX"``, ``"XXT"``, ``"FREQ"``, ``"EIGSH"``,
-        ``"TO_NUMPY"``, ``"FROM_NUMPY"`` (case-insensitive).
+        ``"LOBPCG"``, ``"TO_NUMPY"``, ``"FROM_NUMPY"`` (case-insensitive).
     :param standardized: Select the standardized (mean/variance-scaled) operator. Ignored for the
         non-matrix ops.
     :param multi: Select the multi-GRG variant.
@@ -113,10 +154,20 @@ def _select_operator_cls(
         ops have no multi variant).
     """
     op = op.upper()
-    if op not in ("X", "XT", "XTX", "XXT", "FREQ", "EIGSH", "TO_NUMPY", "FROM_NUMPY"):
+    if op not in (
+        "X",
+        "XT",
+        "XTX",
+        "XXT",
+        "FREQ",
+        "EIGSH",
+        "LOBPCG",
+        "TO_NUMPY",
+        "FROM_NUMPY",
+    ):
         raise ValueError(
             f"Unknown operator {op!r}. Expected one of 'X', 'XT', 'XTX', 'XXT', 'FREQ', 'EIGSH', "
-            f"'TO_NUMPY', 'FROM_NUMPY'."
+            f"'LOBPCG', 'TO_NUMPY', 'FROM_NUMPY'."
         )
     if backend == "SciPy":
         table = _scipy_operator_table()
@@ -376,6 +427,7 @@ class GRGCalculator(GRGCalcInterface):
         init: Optional[Union[str, numpy.typing.NDArray]] = None,
         miss: Optional[numpy.typing.NDArray] = None,
     ):
+        _log_matmul("numpy", input, direction, emit_all_nodes, by_individual, init, miss)
         return pygrgl.matmul(
             self.grg,
             input,
@@ -479,6 +531,10 @@ class GRGSpMVCalculator(GRGCalcInterface):
         init: Optional[Union[str, numpy.typing.NDArray]] = None,
         miss: Optional[numpy.typing.NDArray] = None,
     ) -> numpy.typing.NDArray:
+        _log_matmul(
+            "spmv-cupy" if self.use_cupy else "spmv-scipy",
+            input, direction, emit_all_nodes, by_individual, init, miss,
+        )
         if self.use_cupy:
             with cupy.cuda.Device(self.device):
                 mm_input = cupy.asarray(input)
