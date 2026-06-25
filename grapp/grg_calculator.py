@@ -135,12 +135,10 @@ def _select_operator_cls(
     backend: str, op: str, standardized: bool, multi: bool
 ) -> Callable:
     """
-    Map (op, standardized, multi) to a LinearOperator class (or, for the non-matrix ops, a callable)
+    Map (op, standardized, multi) to a LinearOperator class (or, for ``"EIGSH"``, a callable)
     for the given backend, hiding the SciPy/CuPy choice from downstream code. Returns the
     class/callable, not an instance/result; the caller invokes it with whatever arguments it needs
-    (grg(s), direction, freqs, ...). The non-matrix ops are: ``"FREQ"`` (allele-frequency function),
-    ``"EIGSH"`` (sparse symmetric eigensolver), and ``"TO_NUMPY"``/``"FROM_NUMPY"`` (host<->backend
-    array converters).
+    (grg(s), direction, freqs, ...). ``"EIGSH"`` is the sparse symmetric eigensolver.
 
     :param backend: ``"SciPy"`` or ``"CuPy"``.
     :param op: One of ``"X"``, ``"XT"``, ``"XTX"``, ``"XXT"``, ``"FREQ"``, ``"EIGSH"``,
@@ -150,8 +148,8 @@ def _select_operator_cls(
     :param multi: Select the multi-GRG variant.
     :raises ValueError: For an unrecognized ``op`` or ``backend``.
     :raises NotImplementedError: When the backend has no entry for the requested combination
-        (e.g. the non-standardized multi-XXT operator does not exist for SciPy, and the non-matrix
-        ops have no multi variant).
+        (e.g. the non-standardized multi-XXT operator does not exist for SciPy, and ``"EIGSH"``
+        has no multi variant).
     """
     op = op.upper()
     if op not in (
@@ -286,8 +284,8 @@ class GRGCalcInterface(ABC):
         the backend (SciPy/CuPy) appropriate for this calculator. Returns the class, not an
         instance; the caller constructs it (passing direction for "X"/"XT", freqs when standardized).
 
-        ``op="freq"`` and ``op="eigsh"`` instead returns the backend's allele-frequency function, which the caller
-        invokes as ``fn(grg, ...)``.
+        ``op="eigsh"`` instead returns the backend's sparse symmetric eigensolver, which the caller
+        invokes as ``fn(operator, ...)``.
         """
         pass
 
@@ -538,7 +536,11 @@ class GRGSpMVCalculator(GRGCalcInterface):
         if self.use_cupy:
             with cupy.cuda.Device(self.device):
                 mm_input = cupy.asarray(input)
-                mm_init = cupy.asarray(init) if init is not None else init
+                mm_init = (
+                    init
+                    if (init is None or isinstance(init, str))
+                    else cupy.asarray(init)
+                )
                 mm_miss = cupy.asarray(miss) if miss is not None else miss
                 result = self._op.matmul(
                     mm_input,
