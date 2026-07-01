@@ -229,16 +229,6 @@ def build_mut_lookup(grg):
     return mut_lookup
 
 
-def fetch_ancestral(sequence, position, length):
-    if length <= 0:
-        return None
-    if position <= 0:
-        return None
-    if position + length - 1 > len(sequence):
-        return None
-    return sequence[position - 1 : position - 1 + length]
-
-
 def equals_ignore_case(left, right):
     return left.upper() == right.upper()
 
@@ -263,6 +253,7 @@ def polarize_grg(
     if map_batch_size <= 0:
         raise UserInputError("map_batch_size must be greater than zero")
 
+    ancestral_seq_by_position = "-" + ancestral_seq
     stats = PolarizationStats()
     mut_lookup = build_mut_lookup(grg)
     total_mutations = grg.num_mutations
@@ -335,9 +326,11 @@ def polarize_grg(
             return
         previous_swap_count = len(pending_site_swaps)
         position = int(site_entries[0][3].position)
-        # TODO: it might be simpler to just append a "-" to the 0th position of ancestral_sequence?
-        # Then all the indexing will match between FASTA and GRG.
-        ancestral = fetch_ancestral(ancestral_seq, position, 1)
+        ancestral = (
+            ancestral_seq_by_position[position]
+            if 0 < position < len(ancestral_seq_by_position)
+            else None
+        )
         classify_site(
             site_entries,
             ancestral,

@@ -29,9 +29,7 @@ def polarize_grg_from_fasta(
     map_batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> PolarizationStats:
     fasta, contig = load_fasta(fasta_file)
-    ancestral_sequence = str(
-        fasta[contig][:]
-    ).upper()  # TODO: shouldn't this always be upper, because you passed sequence_always_upper=True?
+    ancestral_sequence = str(fasta[contig][:])
     return polarize_grg(grg, ancestral_sequence, drop_if_no_match, map_batch_size)
 
 
