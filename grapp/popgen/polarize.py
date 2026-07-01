@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from grapp.util.exceptions import UserInputError
-from typing import List
+from typing import List, Optional, Union
 import numpy
 import pygrgl
 
@@ -245,13 +245,20 @@ def allele_matches_ancestral(allele, ancestral_sequence):
 
 
 def polarize_grg(
-    grg: pygrgl.MutableGRG,
+    grg: Union[pygrgl.MutableGRG, str],
     ancestral_seq: str,
     drop_if_no_match: bool = True,
     map_batch_size: int = DEFAULT_BATCH_SIZE,
+    output_file: Optional[str] = None,
 ):
     if map_batch_size <= 0:
         raise UserInputError("map_batch_size must be greater than zero")
+
+    if isinstance(grg, str):
+        loaded_grg = pygrgl.load_mutable_grg(grg, load_up_edges=True)
+        if loaded_grg is None:
+            raise UserInputError(f"Failed to load GRG: {grg}")
+        grg = loaded_grg
 
     ancestral_seq_by_position = "-" + ancestral_seq
     stats = PolarizationStats()
@@ -367,4 +374,6 @@ def polarize_grg(
     flush_pending(force=True)
 
     grg.sort_mutations()
+    if output_file is not None:
+        pygrgl.save_grg(grg, output_file)
     return stats

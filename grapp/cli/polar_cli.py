@@ -3,7 +3,8 @@ from grapp.popgen.polarize import (
     PolarizationStats,
     DEFAULT_BATCH_SIZE,
 )
-from typing import Tuple, Any
+from grapp.util.exceptions import UserInputError
+from typing import Tuple, Any, Optional, Union
 import argparse
 import os
 import pyfaidx
@@ -23,14 +24,21 @@ def load_fasta(path: str) -> Tuple[Any, str]:
 
 
 def polarize_grg_from_fasta(
-    grg: pygrgl.MutableGRG,
+    grg: Union[pygrgl.MutableGRG, str],
     fasta_file: str,
     drop_if_no_match: bool = True,
     map_batch_size: int = DEFAULT_BATCH_SIZE,
+    output_file: Optional[str] = None,
 ) -> PolarizationStats:
     fasta, contig = load_fasta(fasta_file)
     ancestral_sequence = str(fasta[contig][:])
-    return polarize_grg(grg, ancestral_sequence, drop_if_no_match, map_batch_size)
+    return polarize_grg(
+        grg,
+        ancestral_sequence,
+        drop_if_no_match,
+        map_batch_size,
+        output_file=output_file,
+    )
 
 
 def add_options(subparser):
@@ -66,23 +74,17 @@ def run(args):
         print(f"FASTA file does not exist: {args.fasta_file}", file=sys.stderr)
         sys.exit(2)
 
-    grg = pygrgl.load_mutable_grg(args.grg_input, load_up_edges=True)
-    if grg is None:
-        print(f"Failed to load GRG: {args.grg_input}", file=sys.stderr)
-        sys.exit(2)
-
     try:
         stats = polarize_grg_from_fasta(
-            grg,
+            args.grg_input,
             args.fasta_file,
             drop_if_no_match=not args.keep_no_match,
             map_batch_size=args.map_batch_size,
+            output_file=args.output_file,
         )
-    except ValueError as error:
+    except (UserInputError, ValueError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(2)
-
-    pygrgl.save_grg(grg, args.output_file)
 
     print("Polarization complete")
     print(f"  Total seen:           {stats.total_seen}")
