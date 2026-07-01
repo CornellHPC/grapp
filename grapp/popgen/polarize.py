@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from grapp.util.exceptions import UserInputError
 from typing import List, Optional, Union
 import numpy
+import os
 import pygrgl
 
 MISSING_ALLELE = "."
@@ -21,6 +22,67 @@ class PolarizationStats:
     no_alignment: int = 0
     non_snv_skipped: int = 0
     missing_remapped: int = 0
+    mapping_stats: Optional["MutationMappingStatsSummary"] = None
+
+
+@dataclass
+class MutationMappingStatsSummary:
+    total_mutations: int = 0
+    empty_mutations: int = 0
+    mutations_with_one_sample: int = 0
+    mutations_with_no_candidates: int = 0
+    reused_nodes: int = 0
+    reused_node_coverage: int = 0
+    reused_exactly: int = 0
+    singleton_sample_edges: int = 0
+    new_tree_nodes: int = 0
+    samples_processed: int = 0
+    num_candidates: int = 0
+    reuse_size_bigger_than_hist_max: int = 0
+    num_with_singletons: int = 0
+    max_singletons: int = 0
+    reused_mut_nodes: int = 0
+    independent_node_visits: int = 0
+    shared_node_visits: int = 0
+    reuse_size_hist: List[int] = field(default_factory=list)
+    independent_node_visits_by_batch: List[int] = field(default_factory=list)
+    shared_node_visits_by_batch: List[int] = field(default_factory=list)
+    batch_mutation_counts: List[int] = field(default_factory=list)
+    traversal_seconds_by_batch: List[float] = field(default_factory=list)
+    candidate_seconds_by_batch: List[float] = field(default_factory=list)
+    apply_seconds_by_batch: List[float] = field(default_factory=list)
+
+
+def accumulate_mapping_stats(total, delta):
+    total.total_mutations += delta.total_mutations
+    total.empty_mutations += delta.empty_mutations
+    total.mutations_with_one_sample += delta.mutations_with_one_sample
+    total.mutations_with_no_candidates += delta.mutations_with_no_candidates
+    total.reused_nodes += delta.reused_nodes
+    total.reused_node_coverage += delta.reused_node_coverage
+    total.reused_exactly += delta.reused_exactly
+    total.singleton_sample_edges += delta.singleton_sample_edges
+    total.new_tree_nodes += delta.new_tree_nodes
+    total.samples_processed += delta.samples_processed
+    total.num_candidates += delta.num_candidates
+    total.reuse_size_bigger_than_hist_max += delta.reuse_size_bigger_than_hist_max
+    total.num_with_singletons += delta.num_with_singletons
+    total.max_singletons = max(total.max_singletons, delta.max_singletons)
+    total.reused_mut_nodes += delta.reused_mut_nodes
+    total.independent_node_visits += delta.independent_node_visits
+    total.shared_node_visits += delta.shared_node_visits
+    if len(total.reuse_size_hist) < len(delta.reuse_size_hist):
+        total.reuse_size_hist.extend(
+            [0] * (len(delta.reuse_size_hist) - len(total.reuse_size_hist))
+        )
+    for idx, value in enumerate(delta.reuse_size_hist):
+        total.reuse_size_hist[idx] += value
+    total.independent_node_visits_by_batch.extend(delta.independent_node_visits_by_batch)
+    total.shared_node_visits_by_batch.extend(delta.shared_node_visits_by_batch)
+    total.batch_mutation_counts.extend(delta.batch_mutation_counts)
+    total.traversal_seconds_by_batch.extend(delta.traversal_seconds_by_batch)
+    total.candidate_seconds_by_batch.extend(delta.candidate_seconds_by_batch)
+    total.apply_seconds_by_batch.extend(delta.apply_seconds_by_batch)
 
 
 @dataclass(frozen=True)
@@ -40,8 +102,39 @@ def get_descendant_samples(grg, node_id):
     )
 
 
-# apply all remaps in a batch (can be from multiple sites)
-def apply_remaps(grg, removals, remap_mutations, remap_samples, map_batch_size):
+def dense_membership_mode_from_string(value):
+    if value == "never":
+        return pygrgl.DenseMembershipMode.NEVER
+    return pygrgl.DenseMembershipMode.CUTOFF
+
+
+def append_mapping_timings(path, rows, write_header=False):
+    if path is None or not rows:
+        return
+    import csv
+
+    with open(path, "a", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
+def seconds_to_nanos(seconds):
+    return int(round(seconds * 1_000_000_000))
+
+
+def apply_remaps(
+    grg,
+    removals,
+    remap_mutations,
+    remap_samples,
+    map_batch_size,
+    thread_count,
+    dense_membership_mode,
+    timing_csv=None,
+    timing_write_header=False,
+):
     if not removals and not remap_mutations:
         return
 
@@ -50,13 +143,48 @@ def apply_remaps(grg, removals, remap_mutations, remap_samples, map_batch_size):
         grg.remove_mutation(mut_id, node_id)
 
     if remap_mutations:
-        pygrgl.map_mutations(
+        mapping_stats = pygrgl.map_mutations(
             grg,
             remap_mutations,
             remap_samples,
             verbose=False,
             mutation_batch_size=map_batch_size,
+            thread_count=thread_count,
+            dense_membership_mode=dense_membership_mode,
         )
+        timing_rows = []
+        batch_count = len(mapping_stats.traversal_seconds_by_batch)
+        for batch_index in range(batch_count):
+            traversal_seconds = mapping_stats.traversal_seconds_by_batch[batch_index]
+            candidate_seconds = mapping_stats.candidate_seconds_by_batch[batch_index]
+            apply_seconds = mapping_stats.apply_seconds_by_batch[batch_index]
+            traversal_nanos = seconds_to_nanos(traversal_seconds)
+            candidate_nanos = seconds_to_nanos(candidate_seconds)
+            apply_nanos = seconds_to_nanos(apply_seconds)
+            timing_rows.append(
+                {
+                    "batch_mutations": mapping_stats.batch_mutation_counts[batch_index],
+                    "thread_count": thread_count,
+                    "dense_membership_mode": "never"
+                    if dense_membership_mode == pygrgl.DenseMembershipMode.NEVER
+                    else "cutoff",
+                    "traversal_nanos": traversal_nanos,
+                    "candidate_nanos": candidate_nanos,
+                    "apply_nanos": apply_nanos,
+                    "measured_batch_nanos": traversal_nanos
+                    + candidate_nanos
+                    + apply_nanos,
+                    "shared_node_visits": mapping_stats.shared_node_visits_by_batch[
+                        batch_index
+                    ],
+                }
+            )
+        append_mapping_timings(
+            timing_csv,
+            timing_rows,
+            write_header=timing_write_header,
+        )
+        return mapping_stats
 
 
 # compute mutation removals and remaps for one site
@@ -249,10 +377,18 @@ def polarize_grg(
     ancestral_seq: str,
     drop_if_no_match: bool = True,
     map_batch_size: int = DEFAULT_BATCH_SIZE,
+    map_input_batch_size: int = 4096,
+    thread_count: int = 1,
+    dense_membership_mode: str = "cutoff",
+    map_timing_csv: Optional[str] = None,
     output_file: Optional[str] = None,
 ):
     if map_batch_size <= 0:
         raise UserInputError("map_batch_size must be greater than zero")
+    if map_input_batch_size <= 0:
+        raise UserInputError("map_input_batch_size must be greater than zero")
+    if thread_count <= 0:
+        raise UserInputError("thread_count must be greater than zero")
 
     if isinstance(grg, str):
         loaded_grg = pygrgl.load_mutable_grg(grg, load_up_edges=True)
@@ -262,6 +398,8 @@ def polarize_grg(
 
     ancestral_seq_by_position = "-" + ancestral_seq
     stats = PolarizationStats()
+    dense_mode = dense_membership_mode_from_string(dense_membership_mode)
+    timing_needs_header = bool(map_timing_csv) and not os.path.exists(map_timing_csv)
     mut_lookup = build_mut_lookup(grg)
     total_mutations = grg.num_mutations
     site_entries = []  # type: ignore
@@ -272,13 +410,14 @@ def polarize_grg(
     pending_map_removals = []
     pending_remap_mutations = []
     pending_remap_samples = []
+    mapping_stats = MutationMappingStatsSummary()
 
     def materialize_site_swaps():
         nonlocal pending_swap_entry_count
         if not pending_site_swaps:
             return
         site_removals, remap_mutations, remap_samples = build_site_swap_remaps(
-            grg, pending_site_swaps, map_batch_size, stats
+            grg, pending_site_swaps, map_input_batch_size, stats
         )
         pending_map_removals.extend(site_removals)
         pending_remap_mutations.extend(remap_mutations)
@@ -287,15 +426,24 @@ def polarize_grg(
         pending_swap_entry_count = 0
 
     def flush_remaps():
+        nonlocal timing_needs_header
         if not pending_map_removals and not pending_remap_mutations:
             return
-        apply_remaps(
+        remap_stats = apply_remaps(
             grg,
             pending_map_removals,
             pending_remap_mutations,
             pending_remap_samples,
             map_batch_size,
+            thread_count,
+            dense_mode,
+            timing_csv=map_timing_csv,
+            timing_write_header=timing_needs_header,
         )
+        if pending_remap_mutations:
+            timing_needs_header = False
+        if remap_stats is not None:
+            accumulate_mapping_stats(mapping_stats, remap_stats)
         pending_map_removals.clear()
         pending_remap_mutations.clear()
         pending_remap_samples.clear()
@@ -308,13 +456,21 @@ def polarize_grg(
                 pending_removals.clear()
                 flush_remaps()
             elif pending_removals:
-                apply_remaps(grg, pending_removals, [], [], map_batch_size)
+                apply_remaps(
+                    grg,
+                    pending_removals,
+                    [],
+                    [],
+                    map_batch_size,
+                    thread_count,
+                    dense_mode,
+                )
                 pending_removals.clear()
             return
 
-        if pending_swap_entry_count >= map_batch_size:
+        if pending_swap_entry_count >= map_input_batch_size:
             materialize_site_swaps()
-        if len(pending_remap_mutations) >= map_batch_size:
+        if len(pending_remap_mutations) >= map_input_batch_size:
             pending_map_removals[:0] = pending_removals
             pending_removals.clear()
             flush_remaps()
@@ -322,9 +478,17 @@ def polarize_grg(
         if (
             pending_removals
             and not pending_site_swaps
-            and len(pending_removals) >= map_batch_size
+            and len(pending_removals) >= map_input_batch_size
         ):
-            apply_remaps(grg, pending_removals, [], [], map_batch_size)
+            apply_remaps(
+                grg,
+                pending_removals,
+                [],
+                [],
+                map_batch_size,
+                thread_count,
+                dense_mode,
+            )
             pending_removals.clear()
 
     def flush_site():
@@ -376,4 +540,5 @@ def polarize_grg(
     grg.sort_mutations()
     if output_file is not None:
         pygrgl.save_grg(grg, output_file)
+    stats.mapping_stats = mapping_stats
     return stats
