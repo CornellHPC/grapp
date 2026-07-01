@@ -153,6 +153,7 @@ def linear_assoc_no_covar(
     only_beta: bool = False,
     standardize: bool = False,
     dist: str = _GenotypeDist.SAMPLE.value,
+    return_raw: bool = False,
 ) -> pandas.DataFrame:
     """
     Performs regression for each mutation without adjusting for covariates. Missing data is treated as the
@@ -168,8 +169,12 @@ def linear_assoc_no_covar(
         information to compute sample mean and variance), "binomial" (assume the diploid data follows a binomial
         distribution, for mean and variance).  Default: "sample".
     :type dist: str
+    :param return_raw: If True, skip the per-mutation POS/ALT/REF lookups (common_mut_dataframe) and return a
+        DataFrame with only the statistic columns. Useful for benchmarking, where the per-mutation metadata
+        construction can dominate runtime. Default: False.
+    :type return_raw: bool
     :return: A DataFrame containing statistics for each mutation:
-        - POS, ALT, COUNT, BETA, B0, SE, R2, T, and P.
+        - POS, ALT, COUNT, BETA, B0, SE, R2, T, and P (POS/ALT/REF omitted when return_raw=True).
     :rtype: pandas.DataFrame
     """
     PLOIDY = 2
@@ -258,9 +263,11 @@ def linear_assoc_no_covar(
     cdf_vals = t_distribution.cdf(t_stat, df=n - 2)
     p_val = 2 * numpy.where(t_stat > 0, 1 - cdf_vals, cdf_vals)
 
-    return common_mut_dataframe(
-        grg, COUNT=acount, BETA=beta, B0=b0, SE=se, R2=r2, T=t_stat, P=p_val
-    )
+    stats = {"COUNT": acount, "BETA": beta, "B0": b0, "SE": se, "R2": r2, "T": t_stat, "P": p_val}
+    if return_raw:
+        # Skip common_mut_dataframe (per-mutation POS/ALT/REF lookups); return stats only.
+        return pandas.DataFrame(stats, copy=False)
+    return common_mut_dataframe(grg, **stats)
 
 
 def linear_assoc_covar(
@@ -272,6 +279,7 @@ def linear_assoc_covar(
     standardize: bool = False,
     method: str = "QR",
     dist: str = _GenotypeDist.SAMPLE.value,
+    return_raw: bool = False,
 ) -> pandas.DataFrame:
     """
     Performs regression for each mutation with covariate adjustment. Missing data is treated as the
@@ -298,8 +306,12 @@ def linear_assoc_covar(
         information to compute sample mean and variance), "binomial" (assume the diploid data follows a binomial
         distribution, for mean and variance).  Default: "sample".
     :type dist: str
+    :param return_raw: If True, skip the per-mutation POS/ALT/REF lookups (common_mut_dataframe) and return a
+        DataFrame with only the statistic columns. Useful for benchmarking, where the per-mutation metadata
+        construction can dominate runtime. Default: False.
+    :type return_raw: bool
     :return: A DataFrame containing at least BETA, SE, T, and P columns. If hide_covars is False, also includes
-        GAMMA columns.
+        GAMMA columns. POS/ALT/REF are omitted when return_raw=True.
     :rtype: pandas.DataFrame
     """
     PLOIDY = 2
@@ -329,6 +341,7 @@ def linear_assoc_covar(
             only_beta=only_beta,
             dist=dist,
             standardize=standardize,
+            return_raw=return_raw,
         )
 
     grg = _wrap_grg(grg)
@@ -424,4 +437,7 @@ def linear_assoc_covar(
         "P": p,
     }
     df_data.update(gamma_cols)
+    if return_raw:
+        # Skip common_mut_dataframe (per-mutation POS/ALT/REF lookups); return stats only.
+        return pandas.DataFrame(df_data, copy=False)
     return common_mut_dataframe(grg, **df_data)
