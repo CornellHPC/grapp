@@ -7,6 +7,7 @@ import os
 import pygrgl
 import sys
 import tempfile
+import time
 
 
 # Helper to make the usage of a user-specified directory and a temporary directory seemless.
@@ -105,14 +106,20 @@ def split_and_run(
         else:
             logv(f"Using temporary directory {tmpdirname}.")
             logv(f"Splitting GRG into {len(split_ranges)} parts..")
+            timer_start = time.perf_counter()
             grg_parts = split_by_ranges(
                 grg_filename, split_ranges, jobs, out_dir=tmpdirname
             )
+            logv(f"TIMING split_by_ranges_s {time.perf_counter() - timer_start:.6f}")
             arguments = [(part, context) for part in filter(os.path.isfile, grg_parts)]
             assert len(arguments) > 0, "FAILURE: No GRG parts found"
             logv("Performing operation on GRG parts...")
+            timer_start = time.perf_counter()
             with Pool(jobs) as pool:
                 part_results = pool.starmap(operation, arguments)
+            logv(f"TIMING part_operations_s {time.perf_counter() - timer_start:.6f}")
             logv(f"Merging {len(part_results)} parts into single result...")
+            timer_start = time.perf_counter()
             result = merge_operation(grg_parts, part_results, context)
+            logv(f"TIMING merge_operation_s {time.perf_counter() - timer_start:.6f}")
     return result

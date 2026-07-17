@@ -13,6 +13,7 @@ import os
 import pyfaidx
 import pygrgl
 import sys
+import time
 
 
 def load_fasta(path: str) -> Tuple[Any, str]:
@@ -86,6 +87,7 @@ def _polarize_part(grg_or_file, context):
     timing_csv = None
     if context["map_timing_csv"] is not None:
         timing_csv = os.path.join(context["dir"], f"{part_index}.{base}.map-timing.csv")
+    timer_start = time.perf_counter()
     stats = polarize_grg_from_fasta(
         grg_file,
         context["fasta_file"],
@@ -96,6 +98,11 @@ def _polarize_part(grg_or_file, context):
         dense_membership_mode=context["dense_membership_mode"],
         map_timing_csv=timing_csv,
         output_file=output_file,
+    )
+    print(
+        f"TIMING part_total_s {time.perf_counter() - timer_start:.6f} {grg_file}",
+        file=sys.stderr,
+        flush=True,
     )
     return output_file, stats, timing_csv
 
@@ -123,8 +130,20 @@ def _merge_polarized_parts(_grg_parts, part_results, context):
     part_files = [part_file for part_file, _stats, _timing_csv in part_results]
     target = pygrgl.load_mutable_grg(part_files[0], load_up_edges=True)
     if len(part_files) > 1:
+        timer_start = time.perf_counter()
         target.merge(part_files[1:])
+        print(
+            f"TIMING merge_grg_parts_s {time.perf_counter() - timer_start:.6f}",
+            file=sys.stderr,
+            flush=True,
+        )
+    timer_start = time.perf_counter()
     pygrgl.save_grg(target, context["output_file"])
+    print(
+        f"TIMING final_save_grg_s {time.perf_counter() - timer_start:.6f}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     total = PolarizationStats()
     total.mapping_stats = MutationMappingStatsSummary()
