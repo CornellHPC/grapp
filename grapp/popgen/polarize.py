@@ -4,6 +4,8 @@ from typing import List, Optional, Union
 import numpy
 import os
 import pygrgl
+import sys
+import time
 
 MISSING_ALLELE = "."
 UNKNOWN_ALLELES = {".", "-", "N"}
@@ -92,14 +94,29 @@ class SiteSwap:
     ancestral_allele: str
 
 
-def get_descendant_samples(grg, node_id):
+def profile_add(profile, key, seconds):
+    if profile is not None:
+        profile[key] = profile.get(key, 0.0) + seconds
+
+
+def profile_inc(profile, key, amount=1):
+    if profile is not None:
+        profile[key] = profile.get(key, 0) + amount
+
+
+def get_descendant_samples(grg, node_id, profile=None):
     if node_id == pygrgl.INVALID_NODE:
         return numpy.array([], dtype=numpy.uint32)
+    timer_start = time.perf_counter()
     descendants = pygrgl.get_bfs_order(grg, pygrgl.TraversalDirection.DOWN, [node_id])
-    return numpy.fromiter(
+    samples = numpy.fromiter(
         (node for node in descendants if node < grg.num_samples),
         dtype=numpy.uint32,
     )
+    profile_add(profile, "descendant_samples_s", time.perf_counter() - timer_start)
+    profile_inc(profile, "descendant_samples_calls")
+    profile_inc(profile, "descendant_samples_total_samples", len(samples))
+    return samples
 
 
 def dense_membership_mode_from_string(value):
@@ -134,15 +151,22 @@ def apply_remaps(
     dense_membership_mode,
     timing_csv=None,
     timing_write_header=False,
+    profile=None,
 ):
     if not removals and not remap_mutations:
         return
 
+    timer_start = time.perf_counter()
     list(grg.get_node_mutation_miss())
+    profile_add(profile, "get_node_mutation_miss_s", time.perf_counter() - timer_start)
+    timer_start = time.perf_counter()
     for mut_id, node_id in removals:
         grg.remove_mutation(mut_id, node_id)
+    profile_add(profile, "remove_mutations_s", time.perf_counter() - timer_start)
+    profile_inc(profile, "remove_mutations_count", len(removals))
 
     if remap_mutations:
+        timer_start = time.perf_counter()
         mapping_stats = pygrgl.map_mutations(
             grg,
             remap_mutations,
@@ -152,6 +176,9 @@ def apply_remaps(
             thread_count=thread_count,
             dense_membership_mode=dense_membership_mode,
         )
+        profile_add(profile, "map_mutations_wall_s", time.perf_counter() - timer_start)
+        profile_inc(profile, "map_mutations_calls")
+        profile_inc(profile, "map_mutations_count", len(remap_mutations))
         timing_rows = []
         batch_count = len(mapping_stats.traversal_seconds_by_batch)
         for batch_index in range(batch_count):
@@ -179,16 +206,18 @@ def apply_remaps(
                     ],
                 }
             )
+        timer_start = time.perf_counter()
         append_mapping_timings(
             timing_csv,
             timing_rows,
             write_header=timing_write_header,
         )
+        profile_add(profile, "write_map_timing_csv_s", time.perf_counter() - timer_start)
         return mapping_stats
 
 
 # compute mutation removals and remaps for one site
-def build_site_swap_remaps(grg, site_swaps, map_batch_size, stats):
+def build_site_swap_remaps(grg, site_swaps, map_batch_size, stats, profile=None):
     if not site_swaps:
         return [], [], []
 
@@ -221,13 +250,17 @@ def build_site_swap_remaps(grg, site_swaps, map_batch_size, stats):
         for site_index, row_index, swap_index, entry in entry_batch:
             _mut_id, _node_id, _missing_node_id, mutation = entry
             state = site_state[site_index]
-            carriers = get_descendant_samples(grg, _node_id)
+            carriers = get_descendant_samples(grg, _node_id, profile=profile)
+            timer_start = time.perf_counter()
             state["unavailable"][carriers] = True
+            profile_add(profile, "mark_unavailable_s", time.perf_counter() - timer_start)
 
             if row_index == swap_index:
                 removals.append((_mut_id, _node_id))
-                missing = get_descendant_samples(grg, _missing_node_id)
+                missing = get_descendant_samples(grg, _missing_node_id, profile=profile)
+                timer_start = time.perf_counter()
                 state["unavailable"][missing] = True
+                profile_add(profile, "mark_unavailable_s", time.perf_counter() - timer_start)
                 if len(missing) > 0:
                     remap_mutations.append(
                         pygrgl.Mutation(
@@ -254,7 +287,11 @@ def build_site_swap_remaps(grg, site_swaps, map_batch_size, stats):
                     grg.set_mutation_by_id(_mut_id, updated_mutation)
 
     for state in site_state:
+        timer_start = time.perf_counter()
         old_ref_carriers = numpy.flatnonzero(~state["unavailable"]).astype(numpy.uint32)
+        profile_add(profile, "inverse_samples_s", time.perf_counter() - timer_start)
+        profile_inc(profile, "inverse_samples_calls")
+        profile_inc(profile, "inverse_samples_total_samples", len(old_ref_carriers))
         remap_mutations.append(
             pygrgl.Mutation(
                 state["position"],
@@ -383,6 +420,8 @@ def polarize_grg(
     map_timing_csv: Optional[str] = None,
     output_file: Optional[str] = None,
 ):
+    profile = {}
+    profile_total_start = time.perf_counter()
     if map_batch_size <= 0:
         raise UserInputError("map_batch_size must be greater than zero")
     if map_input_batch_size <= 0:
@@ -391,7 +430,9 @@ def polarize_grg(
         raise UserInputError("thread_count must be greater than zero")
 
     if isinstance(grg, str):
+        timer_start = time.perf_counter()
         loaded_grg = pygrgl.load_mutable_grg(grg, load_up_edges=True)
+        profile_add(profile, "load_mutable_grg_s", time.perf_counter() - timer_start)
         if loaded_grg is None:
             raise UserInputError(f"Failed to load GRG: {grg}")
         grg = loaded_grg
@@ -400,7 +441,9 @@ def polarize_grg(
     stats = PolarizationStats()
     dense_mode = dense_membership_mode_from_string(dense_membership_mode)
     timing_needs_header = bool(map_timing_csv) and not os.path.exists(map_timing_csv)
+    timer_start = time.perf_counter()
     mut_lookup = build_mut_lookup(grg)
+    profile_add(profile, "build_mut_lookup_s", time.perf_counter() - timer_start)
     total_mutations = grg.num_mutations
     site_entries = []  # type: ignore
     site_key = None
@@ -416,8 +459,12 @@ def polarize_grg(
         nonlocal pending_swap_entry_count
         if not pending_site_swaps:
             return
+        timer_start = time.perf_counter()
         site_removals, remap_mutations, remap_samples = build_site_swap_remaps(
-            grg, pending_site_swaps, map_input_batch_size, stats
+            grg, pending_site_swaps, map_input_batch_size, stats, profile=profile
+        )
+        profile_add(
+            profile, "build_site_swap_remaps_s", time.perf_counter() - timer_start
         )
         pending_map_removals.extend(site_removals)
         pending_remap_mutations.extend(remap_mutations)
@@ -429,6 +476,7 @@ def polarize_grg(
         nonlocal timing_needs_header
         if not pending_map_removals and not pending_remap_mutations:
             return
+        timer_start = time.perf_counter()
         remap_stats = apply_remaps(
             grg,
             pending_map_removals,
@@ -439,7 +487,9 @@ def polarize_grg(
             dense_mode,
             timing_csv=map_timing_csv,
             timing_write_header=timing_needs_header,
+            profile=profile,
         )
+        profile_add(profile, "apply_remaps_total_s", time.perf_counter() - timer_start)
         if pending_remap_mutations:
             timing_needs_header = False
         if remap_stats is not None:
@@ -456,6 +506,7 @@ def polarize_grg(
                 pending_removals.clear()
                 flush_remaps()
             elif pending_removals:
+                timer_start = time.perf_counter()
                 apply_remaps(
                     grg,
                     pending_removals,
@@ -464,7 +515,9 @@ def polarize_grg(
                     map_batch_size,
                     thread_count,
                     dense_mode,
+                    profile=profile,
                 )
+                profile_add(profile, "apply_remaps_total_s", time.perf_counter() - timer_start)
                 pending_removals.clear()
             return
 
@@ -480,6 +533,7 @@ def polarize_grg(
             and not pending_site_swaps
             and len(pending_removals) >= map_input_batch_size
         ):
+            timer_start = time.perf_counter()
             apply_remaps(
                 grg,
                 pending_removals,
@@ -488,7 +542,9 @@ def polarize_grg(
                 map_batch_size,
                 thread_count,
                 dense_mode,
+                profile=profile,
             )
+            profile_add(profile, "apply_remaps_total_s", time.perf_counter() - timer_start)
             pending_removals.clear()
 
     def flush_site():
@@ -502,6 +558,7 @@ def polarize_grg(
             if 0 < position < len(ancestral_seq_by_position)
             else None
         )
+        timer_start = time.perf_counter()
         classify_site(
             site_entries,
             ancestral,
@@ -510,10 +567,12 @@ def polarize_grg(
             pending_removals,
             pending_site_swaps,
         )
+        profile_add(profile, "classify_site_s", time.perf_counter() - timer_start)
         if len(pending_site_swaps) > previous_swap_count:
             pending_swap_entry_count += len(site_entries)
         flush_pending()
 
+    timer_start = time.perf_counter()
     for mut_id in range(total_mutations):
         mutation = grg.get_mutation_by_id(mut_id)
         if mutation.allele == MISSING_ALLELE:
@@ -533,12 +592,49 @@ def polarize_grg(
             site_entries.clear()
         site_key = key
         site_entries.append((mut_id, node_id, missing_node_id, mutation))
+    profile_add(profile, "scan_mutations_s", time.perf_counter() - timer_start)
 
     flush_site()
     flush_pending(force=True)
 
+    timer_start = time.perf_counter()
     grg.sort_mutations()
+    profile_add(profile, "sort_mutations_s", time.perf_counter() - timer_start)
     if output_file is not None:
+        timer_start = time.perf_counter()
         pygrgl.save_grg(grg, output_file)
+        profile_add(profile, "save_grg_s", time.perf_counter() - timer_start)
     stats.mapping_stats = mapping_stats
+    profile_add(profile, "polarize_total_s", time.perf_counter() - profile_total_start)
+    profile["scan_and_classify_s"] = profile.get("scan_mutations_s", 0.0) + profile.get(
+        "classify_site_s", 0.0
+    )
+    profile["materialize_remaps_s"] = profile.get(
+        "build_site_swap_remaps_s", 0.0
+    )
+    profile_fields = (
+        "polarize_total_s",
+        "load_mutable_grg_s",
+        "build_mut_lookup_s",
+        "scan_and_classify_s",
+        "materialize_remaps_s",
+        "descendant_samples_s",
+        "inverse_samples_s",
+        "map_mutations_wall_s",
+        "save_grg_s",
+        "descendant_samples_calls",
+        "descendant_samples_total_samples",
+        "inverse_samples_total_samples",
+    )
+    print(
+        "TIMING polarize_profile "
+        + " ".join(
+            f"{key}={profile.get(key, 0.0):.6f}"
+            if isinstance(profile.get(key, 0.0), float)
+            else f"{key}={profile.get(key, 0)}"
+            for key in profile_fields
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
     return stats
