@@ -50,6 +50,7 @@ class MutationMappingStatsSummary:
     independent_node_visits_by_batch: List[int] = field(default_factory=list)
     shared_node_visits_by_batch: List[int] = field(default_factory=list)
     batch_mutation_counts: List[int] = field(default_factory=list)
+    batch_sample_counts: List[int] = field(default_factory=list)
     traversal_seconds_by_batch: List[float] = field(default_factory=list)
     candidate_seconds_by_batch: List[float] = field(default_factory=list)
     apply_seconds_by_batch: List[float] = field(default_factory=list)
@@ -82,6 +83,7 @@ def accumulate_mapping_stats(total, delta):
     total.independent_node_visits_by_batch.extend(delta.independent_node_visits_by_batch)
     total.shared_node_visits_by_batch.extend(delta.shared_node_visits_by_batch)
     total.batch_mutation_counts.extend(delta.batch_mutation_counts)
+    total.batch_sample_counts.extend(delta.batch_sample_counts)
     total.traversal_seconds_by_batch.extend(delta.traversal_seconds_by_batch)
     total.candidate_seconds_by_batch.extend(delta.candidate_seconds_by_batch)
     total.apply_seconds_by_batch.extend(delta.apply_seconds_by_batch)
@@ -191,6 +193,7 @@ def apply_remaps(
             timing_rows.append(
                 {
                     "batch_mutations": mapping_stats.batch_mutation_counts[batch_index],
+                    "batch_samples": mapping_stats.batch_sample_counts[batch_index],
                     "thread_count": thread_count,
                     "dense_membership_mode": "never"
                     if dense_membership_mode == pygrgl.DenseMembershipMode.NEVER
