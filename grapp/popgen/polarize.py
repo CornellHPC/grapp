@@ -225,42 +225,49 @@ def build_site_swap_remaps(grg, site_swaps, map_batch_size, stats, profile=None)
     remap_mutations = []
     remap_samples = []
 
-    site_state = []
-    flat_entries = []
-    for site_index, site_swap in enumerate(site_swaps):
+    for site_swap in site_swaps:
         entries = site_swap.entries
         swap_mutation = entries[site_swap.swap_index][3]
         has_missing = any(entry[2] != pygrgl.INVALID_NODE for entry in entries)
-        site_state.append(
-            {
-                "ancestral_allele": site_swap.ancestral_allele,
-                "old_ref": entries[0][3].ref_allele,
-                "position": int(entries[0][3].position),
-                "time": swap_mutation.time,
-                "unavailable": numpy.zeros(grg.num_samples, dtype=bool),
-                "full_remap": has_missing,
-            }
+        state = {
+            "ancestral_allele": site_swap.ancestral_allele,
+            "old_ref": entries[0][3].ref_allele,
+            "position": int(entries[0][3].position),
+            "time": swap_mutation.time,
+            "full_remap": has_missing,
+        }
+        node_ids = [entry[1] for entry in entries]
+        missing_node_id = entries[site_swap.swap_index][2]
+        helper_node_ids = list(node_ids)
+        if missing_node_id != pygrgl.INVALID_NODE:
+            helper_node_ids.append(missing_node_id)
+
+        timer_start = time.perf_counter()
+        carrier_sets, old_ref_carriers = pygrgl.get_descendant_samples_and_complement(
+            grg, helper_node_ids
         )
+        profile_add(profile, "descendant_samples_s", time.perf_counter() - timer_start)
+        profile_inc(profile, "descendant_samples_calls", len(helper_node_ids))
+        profile_inc(
+            profile,
+            "descendant_samples_total_samples",
+            sum(len(carrier_set) for carrier_set in carrier_sets),
+        )
+        profile_inc(profile, "inverse_samples_calls")
+        profile_inc(profile, "inverse_samples_total_samples", len(old_ref_carriers))
+
+        missing = (
+            carrier_sets[len(entries)]
+            if missing_node_id != pygrgl.INVALID_NODE
+            else numpy.array([], dtype=numpy.uint32)
+        )
+
         for row_index, entry in enumerate(entries):
-            flat_entries.append((site_index, row_index, site_swap.swap_index, entry))
-
-    for start in range(0, len(flat_entries), map_batch_size):
-        entry_batch = flat_entries[start : start + map_batch_size]
-
-        for site_index, row_index, swap_index, entry in entry_batch:
             _mut_id, _node_id, _missing_node_id, mutation = entry
-            state = site_state[site_index]
-            carriers = get_descendant_samples(grg, _node_id, profile=profile)
-            timer_start = time.perf_counter()
-            state["unavailable"][carriers] = True
-            profile_add(profile, "mark_unavailable_s", time.perf_counter() - timer_start)
+            carriers = carrier_sets[row_index]
 
-            if row_index == swap_index:
+            if row_index == site_swap.swap_index:
                 removals.append((_mut_id, _node_id))
-                missing = get_descendant_samples(grg, _missing_node_id, profile=profile)
-                timer_start = time.perf_counter()
-                state["unavailable"][missing] = True
-                profile_add(profile, "mark_unavailable_s", time.perf_counter() - timer_start)
                 if len(missing) > 0:
                     remap_mutations.append(
                         pygrgl.Mutation(
@@ -286,12 +293,6 @@ def build_site_swap_remaps(grg, site_swaps, map_batch_size, stats, profile=None)
                 else:
                     grg.set_mutation_by_id(_mut_id, updated_mutation)
 
-    for state in site_state:
-        timer_start = time.perf_counter()
-        old_ref_carriers = numpy.flatnonzero(~state["unavailable"]).astype(numpy.uint32)
-        profile_add(profile, "inverse_samples_s", time.perf_counter() - timer_start)
-        profile_inc(profile, "inverse_samples_calls")
-        profile_inc(profile, "inverse_samples_total_samples", len(old_ref_carriers))
         remap_mutations.append(
             pygrgl.Mutation(
                 state["position"],
