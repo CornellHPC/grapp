@@ -121,12 +121,6 @@ def get_descendant_samples(grg, node_id, profile=None):
     return samples
 
 
-def dense_membership_mode_from_string(value):
-    if value == "never":
-        return pygrgl.DenseMembershipMode.NEVER
-    return pygrgl.DenseMembershipMode.CUTOFF
-
-
 def append_mapping_timings(path, rows, write_header=False):
     if path is None or not rows:
         return
@@ -150,7 +144,7 @@ def apply_remaps(
     remap_samples,
     map_batch_size,
     thread_count,
-    dense_membership_mode,
+    dense_membership_cutoff,
     timing_csv=None,
     timing_write_header=False,
     profile=None,
@@ -176,7 +170,7 @@ def apply_remaps(
             verbose=False,
             mutation_batch_size=map_batch_size,
             thread_count=thread_count,
-            dense_membership_mode=dense_membership_mode,
+            dense_membership_cutoff=dense_membership_cutoff,
         )
         profile_add(profile, "map_mutations_wall_s", time.perf_counter() - timer_start)
         profile_inc(profile, "map_mutations_calls")
@@ -195,9 +189,7 @@ def apply_remaps(
                     "batch_mutations": mapping_stats.batch_mutation_counts[batch_index],
                     "batch_samples": mapping_stats.batch_sample_counts[batch_index],
                     "thread_count": thread_count,
-                    "dense_membership_mode": "never"
-                    if dense_membership_mode == pygrgl.DenseMembershipMode.NEVER
-                    else "cutoff",
+                    "dense_membership_cutoff": dense_membership_cutoff,
                     "traversal_nanos": traversal_nanos,
                     "candidate_nanos": candidate_nanos,
                     "apply_nanos": apply_nanos,
@@ -420,7 +412,7 @@ def polarize_grg(
     map_batch_size: int = DEFAULT_BATCH_SIZE,
     map_input_batch_size: int = 4096,
     thread_count: int = 1,
-    dense_membership_mode: str = "cutoff",
+    dense_membership_cutoff: float = 0.001,
     map_timing_csv: Optional[str] = None,
     output_file: Optional[str] = None,
 ):
@@ -432,6 +424,8 @@ def polarize_grg(
         raise UserInputError("map_input_batch_size must be greater than zero")
     if thread_count <= 0:
         raise UserInputError("thread_count must be greater than zero")
+    if dense_membership_cutoff < 0.0 or dense_membership_cutoff > 1.0:
+        raise UserInputError("dense_membership_cutoff must be between 0 and 1")
 
     if isinstance(grg, str):
         timer_start = time.perf_counter()
@@ -443,7 +437,6 @@ def polarize_grg(
 
     ancestral_seq_by_position = "-" + ancestral_seq
     stats = PolarizationStats()
-    dense_mode = dense_membership_mode_from_string(dense_membership_mode)
     timing_needs_header = bool(map_timing_csv) and not os.path.exists(map_timing_csv)
     timer_start = time.perf_counter()
     mut_lookup = build_mut_lookup(grg)
@@ -488,7 +481,7 @@ def polarize_grg(
             pending_remap_samples,
             map_batch_size,
             thread_count,
-            dense_mode,
+            dense_membership_cutoff,
             timing_csv=map_timing_csv,
             timing_write_header=timing_needs_header,
             profile=profile,
@@ -518,7 +511,7 @@ def polarize_grg(
                     [],
                     map_batch_size,
                     thread_count,
-                    dense_mode,
+                    dense_membership_cutoff,
                     profile=profile,
                 )
                 profile_add(profile, "apply_remaps_total_s", time.perf_counter() - timer_start)
@@ -545,7 +538,7 @@ def polarize_grg(
                 [],
                 map_batch_size,
                 thread_count,
-                dense_mode,
+                dense_membership_cutoff,
                 profile=profile,
             )
             profile_add(profile, "apply_remaps_total_s", time.perf_counter() - timer_start)

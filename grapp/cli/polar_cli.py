@@ -34,7 +34,7 @@ def polarize_grg_from_fasta(
     map_batch_size: int = DEFAULT_BATCH_SIZE,
     map_input_batch_size: int = 4096,
     thread_count: int = 1,
-    dense_membership_mode: str = "cutoff",
+    dense_membership_cutoff: float = 0.001,
     map_timing_csv: Optional[str] = None,
     output_file: Optional[str] = None,
 ) -> PolarizationStats:
@@ -47,7 +47,7 @@ def polarize_grg_from_fasta(
         map_batch_size,
         map_input_batch_size=map_input_batch_size,
         thread_count=thread_count,
-        dense_membership_mode=dense_membership_mode,
+        dense_membership_cutoff=dense_membership_cutoff,
         map_timing_csv=map_timing_csv,
         output_file=output_file,
     )
@@ -95,7 +95,7 @@ def _polarize_part(grg_or_file, context):
         map_batch_size=context["map_batch_size"],
         map_input_batch_size=context["map_input_batch_size"],
         thread_count=context["thread_count"],
-        dense_membership_mode=context["dense_membership_mode"],
+        dense_membership_cutoff=context["dense_membership_cutoff"],
         map_timing_csv=timing_csv,
         output_file=output_file,
     )
@@ -183,10 +183,10 @@ def add_options(subparser):
         help="Number of remap mutations to pass from Python to C++ per call",
     )
     subparser.add_argument(
-        "--dense-membership-mode",
-        choices=("cutoff", "never"),
-        default="cutoff",
-        help="Use dense membership sets at the cutoff, or never use them",
+        "--dense-membership-cutoff",
+        type=float,
+        default=0.001,
+        help="Coverage proportion above which dense membership sets are used",
     )
     subparser.add_argument(
         "--map-timing-csv",
@@ -236,7 +236,7 @@ def run(args):
                     "map_batch_size": args.map_batch_size,
                     "map_input_batch_size": args.map_input_batch_size,
                     "thread_count": args.thread_count,
-                    "dense_membership_mode": args.dense_membership_mode,
+                    "dense_membership_cutoff": args.dense_membership_cutoff,
                     "map_timing_csv": args.map_timing_csv,
                     "output_file": args.output_file,
                 },
@@ -253,7 +253,7 @@ def run(args):
                 map_batch_size=args.map_batch_size,
                 map_input_batch_size=args.map_input_batch_size,
                 thread_count=args.thread_count,
-                dense_membership_mode=args.dense_membership_mode,
+                dense_membership_cutoff=args.dense_membership_cutoff,
                 map_timing_csv=args.map_timing_csv,
                 output_file=args.output_file,
             )
