@@ -1,23 +1,58 @@
 # grapp
 
-A library and command-line tool for tackling problems in statistical and population genetics, implemented
-on top of the Genotype Representation Graph (GRG) format. [GRG](https://github.com/aprilweilab/grgl) is
-a file format and data structure that losslessly represents a genetic dataset. It has the advantage of
-compressing large datasets significantly, while also making calculations over that dataset extremely fast
-(see [the paper](https://www.nature.com/articles/s43588-024-00739-9) and the
-[core library](https://github.com/aprilweilab/grgl)).
+A library and command-line tool for tackling problems in statistical and population genetics, implemented on top of the Genotype Representation Graph (GRG) format. [GRG](https://github.com/CornellHPC/grgl) is a file format and data structure that losslessly represents a genetic dataset. It has the advantage of compressing large datasets significantly, while also making calculations over that dataset extremely fast (see [the GRG paper](https://www.nature.com/articles/s43588-024-00739-9) and the [core library](https://github.com/CornellHPC/grgl)).
 
-Some notes on usage are below, and you can also browse [the Python documentation for grapp](https://grapp.readthedocs.io/en/latest/).
+This branch also contains the `grapp polarize` workflow from the paper, "Cheaper by the Batch: Shared Traversal for Genotype Graph Editing", using GRAPP as the user-facing command-line wrapper around the core GRGL mutation-mapping implementation. A preprint describing the polarization work is available at [TODO: add paper link].
 
-Check out the [command-line cheatsheet](https://github.com/aprilweilab/grapp/blob/main/CHEATSHEET.md) for examples on how to perform many tasks.
+Some notes on usage are below.
+
+Check out the [command-line cheatsheet](https://github.com/CornellHPC/grapp/blob/main/CHEATSHEET.md) for examples on how to perform many tasks.
 
 ## Installation
 
-```
+```bash
 pip install grapp
 ```
 
+For a local checkout of this branch:
+
+```bash
+python -m pip install .
+```
+
+If `pygrgl` is not available from your package index or does not include the GRGL changes needed for the polarization workflow, install GRGL from the corresponding source checkout first.
+
 ## Modules
+
+### popgen
+
+Polarize GRGs against an ancestral reference sequence using the workflow described in the polarization paper. The core GRG data structure and mutation-mapping implementation are provided by [GRGL](https://github.com/CornellHPC/grgl).
+
+#### Command Line
+
+```
+usage: grapp polarize [-h] -o OUTPUT_FILE [--keep-no-match] [--map-batch-size MAP_BATCH_SIZE] [--jobs JOBS] [--split-threshold SPLIT_THRESHOLD] [--temp-dir TEMP_DIR] grg_input fasta_file
+
+positional arguments:
+  grg_input             Input GRG file to polarize
+  fasta_file            FASTA containing (only) the ancestral sequence
+
+options:
+  -h, --help            show this help message and exit
+  -o OUTPUT_FILE, --output OUTPUT_FILE
+                        Output GRG file
+  --keep-no-match       Keep mutations with no matching allele in the FASTA instead of dropping them
+  --map-batch-size MAP_BATCH_SIZE
+                        Number of flipped mutations to process per graph traversal; larger values use more RAM
+  --jobs JOBS           Number of split GRG parts to polarize in parallel
+  --split-threshold SPLIT_THRESHOLD
+                        Basepair threshold for splitting the GRG before polarizing
+  --temp-dir TEMP_DIR   Directory for split GRG parts and intermediate polarized parts
+```
+
+#### Library
+
+The polarization API is available through `grapp.popgen.polarize_grg`.
 
 ### assoc
 
@@ -161,5 +196,4 @@ The `nn` module lets you search a dataset stored as a GRG for nearest neighbors 
 * There are APIs that let you query using a sample/mutation already in the dataset (GRG) or more generally
   you can query using an external sample/mutation that is not in the dataset, though your options may
   be slightly more limited in the latter case.
-
 
