@@ -57,7 +57,7 @@ class TestBoltLmmInf(unittest.TestCase):
         cls.chrom_grgs = list(zip(CHROMS, cls.grgs))
         cls.n = cls.grgs[0].num_individuals
 
-    def _run_against_truth(self, pheno_file, truth_file, expected_missing):
+    def _run_against_truth(self, pheno_file, truth_file, expected_missing, cov=None):
         # read_pheno maps the NA missing token to NaN; the driver drops those
         # individuals (Nused = n - expected_missing) and rebuilds the intercept basis.
         y = read_pheno(os.path.join(INPUT_DIR, pheno_file))
@@ -67,7 +67,8 @@ class TestBoltLmmInf(unittest.TestCase):
             expected_missing,
             f"{pheno_file}: expected {expected_missing} missing, got {int(np.isnan(y).sum())}",
         )
-        cov = CovariateBasis.intercept_only(self.n)
+        if cov is None:
+            cov = CovariateBasis.intercept_only(self.n)
 
         fit, cal, _, stats = bolt_lmm_inf(
             self.chrom_grgs,
@@ -117,6 +118,85 @@ class TestBoltLmmInf(unittest.TestCase):
         self._run_against_truth(
             "bolt.miss.pheno.txt", "bolt.miss.truth.tsv", expected_missing=55
         )
+
+    def test_covar_basis_filter_equivalence(self):
+        # Core of the covariates+missing patch: restricting the orthonormal
+        # covariate basis to the retained rows (cov_full.basis[nm]) and
+        # re-orthonormalizing must span the SAME subspace as orthonormalizing the
+        # reduced RAW design directly (C_full[nm]). Equal projection matrices =>
+        # identical BOLT residualization. Pure algebra, no GRG compute.
+        rng = np.random.default_rng(0)
+        N = self.n
+        C_full = np.column_stack([np.ones(N), rng.standard_normal((N, 3))])
+        qcols = ("a", "b", "c")
+        cov_full = CovariateBasis.from_matrix(
+            C_full, covar_cols=(), q_covar_cols=qcols, covar_max_levels=10
+        )
+        nm = np.flatnonzero(rng.random(N) > 0.15)  # drop ~15% of individuals
+        self.assertGreater(nm.size, 0)
+        self.assertLess(nm.size, N)
+
+        # Path taken inside bolt_lmm_inf after the patch:
+        cov_a = CovariateBasis.from_matrix(
+            cov_full.basis[nm, :],
+            covar_cols=cov_full.covar_cols,
+            q_covar_cols=cov_full.q_covar_cols,
+            covar_max_levels=cov_full.covar_max_levels,
+        )
+        # Independent reference: orthonormalize the reduced raw design.
+        cov_b = CovariateBasis.from_matrix(
+            C_full[nm, :], covar_cols=(), q_covar_cols=qcols, covar_max_levels=10
+        )
+
+        self.assertEqual(cov_a.nused, nm.size)
+        self.assertEqual(cov_b.nused, nm.size)
+        self.assertEqual(cov_a.cindep, cov_b.cindep)
+        p_a = cov_a.basis @ cov_a.basis.T
+        p_b = cov_b.basis @ cov_b.basis.T
+        np.testing.assert_allclose(p_a, p_b, atol=1e-10)
+
+    def test_missing_degenerate_covar_matches_intercept_truth(self):
+        # A covariate design that collapses to the intercept (rank 1) but with a
+        # non-empty q_covar_cols forces the patched else-branch (from_matrix on the
+        # filtered basis). The result must reproduce the intercept-only C++ BOLT
+        # missing truth, proving the new branch is wired correctly and reduces.
+        ones = np.ones(self.n)
+        cov = CovariateBasis.from_matrix(
+            np.column_stack([ones, 2.0 * ones]),
+            covar_cols=(),
+            q_covar_cols=("dup",),
+            covar_max_levels=10,
+        )
+        self.assertEqual(cov.cindep, 1)  # collapsed to intercept
+        self._run_against_truth(
+            "bolt.miss.pheno.txt", "bolt.miss.truth.tsv", expected_missing=55, cov=cov
+        )
+
+    def test_missing_with_real_covar_runs(self):
+        # End-to-end smoke for the general case: a genuine multi-column covariate
+        # together with missing phenotypes must run (no NotImplementedError) and
+        # yield sane, finite output over the reduced cohort.
+        y = read_pheno(os.path.join(INPUT_DIR, "bolt.miss.pheno.txt"))
+        self.assertEqual(int(np.isnan(y).sum()), 55)
+        rng = np.random.default_rng(SEED)
+        C_full = np.column_stack([np.ones(self.n), rng.standard_normal((self.n, 2))])
+        cov = CovariateBasis.from_matrix(
+            C_full, covar_cols=(), q_covar_cols=("x", "y"), covar_max_levels=10
+        )
+        self.assertEqual(cov.cindep, 3)
+
+        fit, cal, _, stats = bolt_lmm_inf(
+            self.chrom_grgs, y, cov, seed=SEED, threads=1
+        )
+        df = lmm_inf_stats_to_dataframe(stats, self.chrom_grgs)
+
+        self.assertGreater(len(df), 0)
+        beta = df["BETA"].astype(float).to_numpy()
+        chisq = df["CHISQ_BOLT_LMM_INF"].astype(float).to_numpy()
+        self.assertTrue(np.isfinite(beta).all(), "non-finite BETA with covariates+missing")
+        self.assertTrue(np.isfinite(chisq).all(), "non-finite CHISQ with covariates+missing")
+        self.assertTrue(0.0 <= fit.h2 <= 1.0, f"h2 out of range: {fit.h2}")
+        self.assertGreater(cal.factor, 0.0, f"calibration not positive: {cal.factor}")
 
 
 if __name__ == "__main__":
