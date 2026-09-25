@@ -148,6 +148,25 @@ mutation filters:
 
 Library API reference document is [here](https://grapp.readthedocs.io/en/latest/). There are also some tutorials in the [GRG documentation](https://grgl.readthedocs.io/en/stable/tutorials/GWAS.html) (and correspond [Jupyter notebooks](https://github.com/aprilweilab/grgl/tree/main/doc/tutorials/notebooks)).
 
+### polarize
+
+Polarize a GRG against an ancestral FASTA containing exactly one contig:
+
+```bash
+grapp polarize input.grg ancestral.fa -o polarized.grg \
+  --map-batch-size 100 \
+  --map-input-batch-size 4096 \
+  --map-timing-csv mapping-timings.csv
+```
+
+- `--map-batch-size` (default 100): mutations per shared traversal inside C++ `mapMutations`.
+- `--map-input-batch-size` (default 4096): remaps collected in Python before calling C++; each call can process multiple traversal batches.
+- `--map-timing-csv` (optional): per-batch timings and shared node-visit counts, written together after each mapping call.
+
+Input batching reduces pending remap memory while grouping timing-file writes to
+limit instrumentation overhead. Smaller input batches use less pending memory but
+increase call and write frequency. Omit `--map-timing-csv` if timing files are unnecessary.
+
 ### nn
 
 Experimental library for nearest neighbors search over GRG.
@@ -161,5 +180,4 @@ The `nn` module lets you search a dataset stored as a GRG for nearest neighbors 
 * There are APIs that let you query using a sample/mutation already in the dataset (GRG) or more generally
   you can query using an external sample/mutation that is not in the dataset, though your options may
   be slightly more limited in the latter case.
-
 
