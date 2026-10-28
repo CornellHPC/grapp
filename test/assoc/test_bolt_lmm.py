@@ -1,5 +1,6 @@
 import os
 import unittest
+import pytest
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,7 @@ REL_TOL = {
 ABS_TOL = 5e-2  # median absolute error, all columns
 
 
+@pytest.mark.human_data
 class TestBoltLmmInf(unittest.TestCase):
     """grgl-backend regression tests for BOLT-LMM-inf (with and without missingness)."""
 
